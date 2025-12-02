@@ -30,7 +30,7 @@ class Config:
     PROXY_CHANGE_API: str = os.getenv("PROXY_CHANGE_API", "")
     
     # === SCANNER ===
-    SCAN_INTERVAL_HOURS: int = int(os.getenv("SCAN_INTERVAL_HOURS", "6"))
+    SCAN_INTERVAL_HOURS: float = float(os.getenv("SCAN_INTERVAL_HOURS", "6"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "50"))
     
     # === RATE LIMITS ===
@@ -46,6 +46,7 @@ class Config:
     
     # === KASPI API ===
     KASPI_OFFERS_URL = "https://kaspi.kz/yml/offer-view/offers/{master_sku}"
+    KASPI_PRODUCT_URL = "https://kaspi.kz/shop/api/v2/products/{master_sku}"
     KASPI_MERCHANT_URL = "https://kaspi.kz/shop/info/merchant/{merchant_id}/review/?productCode={product_sku}"
     KASPI_HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",

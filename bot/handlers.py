@@ -101,15 +101,28 @@ async def cmd_add(message: Message):
         product_title = None
         try:
             parser = KaspiParser(Config.PROXY_URL)
-            success, offers = await parser.get_product_offers(master_sku)
-            if success and offers and len(offers) > 0:
-                # Пробуем разные поля для названия
+            
+            # Сначала пытаемся получить через product API
+            product_info = await parser.get_product_info(master_sku)
+            if product_info:
                 product_title = (
-                    offers[0].get('productName') or 
-                    offers[0].get('title') or 
-                    offers[0].get('name')
+                    product_info.get('title') or 
+                    product_info.get('name') or 
+                    product_info.get('productName')
                 )
-                logger.info(f"Получено название товара: {product_title}")
+                logger.info(f"Получено название из product API: {product_title}")
+            
+            # Если не получилось через product API - пробуем через offers
+            if not product_title:
+                success, offers = await parser.get_product_offers(master_sku)
+                if success and offers and len(offers) > 0:
+                    # Пробуем разные поля для названия
+                    product_title = (
+                        offers[0].get('productName') or 
+                        offers[0].get('title') or 
+                        offers[0].get('name')
+                    )
+                    logger.info(f"Получено название из offers: {product_title}")
         except Exception as e:
             logger.warning(f"Не удалось получить название товара при добавлении: {e}")
         
@@ -239,72 +252,88 @@ async def show_product_sellers(callback: CallbackQuery):
         # Получаем продавцов
         sellers_list = await product_sellers_db.get_sellers_for_product(sku, active_only=True)
         
-        if not sellers_list:
-            await callback.answer("⚠️ Продавцов пока нет", show_alert=True)
-            return
-        
         total = len(sellers_list)
-        total_pages = (total + per_page - 1) // per_page
-        
-        # Вычисляем индексы для пагинации
-        start_idx = (page - 1) * per_page
-        end_idx = start_idx + per_page
-        sellers_page = sellers_list[start_idx:end_idx]
         
         # Формируем сообщение
         title = product.get('title') or 'Без названия'
         text = f"<b>{title}</b>\n\n"
         text += f"<b>SKU:</b> {hcode(sku)}\n"
-        text += f"<b>Всего продавцов:</b> {total}\n"
-        text += f"<b>Страница:</b> {page}/{total_pages}\n\n"
-        text += "━━━━━━━━━━━━━━━━━━━━\n\n"
         
-        # Показываем продавцов на текущей странице
-        for idx, seller_link in enumerate(sellers_page, start_idx + 1):
-            seller_id = seller_link['seller_id']
-            price = seller_link['price']
+        if not sellers_list:
+            # Если продавцов нет - показываем это
+            text += f"<b>Всего продавцов:</b> 0\n\n"
+            text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+            text += "⚠️ <i>Продавцов пока нет.\n"
+            text += "Они появятся после следующего сканирования.</i>\n"
+        else:
+            # Есть продавцы - показываем их
+            total_pages = (total + per_page - 1) // per_page
             
-            # Получаем полную информацию о продавце
-            seller = await sellers_db.get_seller(seller_id)
-            if not seller:
-                continue
+            # Вычисляем индексы для пагинации
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+            sellers_page = sellers_list[start_idx:end_idx]
             
-            merchant_name = seller['merchant_name']
-            phone = seller.get('phone') or 'недоступен'
+            text += f"<b>Всего продавцов:</b> {total}\n"
+            text += f"<b>Страница:</b> {page}/{total_pages}\n\n"
+            text += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
-            text += f"{idx}. <b>{merchant_name}</b>\n"
-            text += f"   Цена: {price:,.0f} ₸\n"
-            text += f"   Телефон: <code>{phone}</code>\n\n"
+            # Показываем продавцов на текущей странице
+            for idx, seller_link in enumerate(sellers_page, start_idx + 1):
+                seller_id = seller_link['seller_id']
+                price = seller_link['price']
+                
+                # Получаем полную информацию о продавце
+                seller = await sellers_db.get_seller(seller_id)
+                if not seller:
+                    continue
+                
+                merchant_name = seller['merchant_name']
+                phone = seller.get('phone') or 'недоступен'
+                
+                text += f"{idx}. <b>{merchant_name}</b>\n"
+                text += f"   Цена: {price:,.0f} ₸\n"
+                text += f"   Телефон: <code>{phone}</code>\n\n"
         
         # Кнопки навигации
         keyboard = []
-        nav_buttons = []
         
-        # Кнопка "Назад" (к предыдущей странице)
-        if page > 1:
-            nav_buttons.append(
-                InlineKeyboardButton(
-                    text="◀️ Назад",
-                    callback_data=f"product_{sku}_{page-1}"
+        # Кнопки навигации только если есть продавцы
+        if total > 0:
+            total_pages = (total + per_page - 1) // per_page
+            nav_buttons = []
+            
+            # Кнопка "Назад" (к предыдущей странице)
+            if page > 1:
+                nav_buttons.append(
+                    InlineKeyboardButton(
+                        text="◀️ Назад",
+                        callback_data=f"product_{sku}_{page-1}"
+                    )
                 )
-            )
-        
-        # Кнопка "Вперед" (к следующей странице)
-        if page < total_pages:
-            nav_buttons.append(
-                InlineKeyboardButton(
-                    text="Вперед ▶️",
-                    callback_data=f"product_{sku}_{page+1}"
+            
+            # Кнопка "Вперед" (к следующей странице)
+            if page < total_pages:
+                nav_buttons.append(
+                    InlineKeyboardButton(
+                        text="Вперед ▶️",
+                        callback_data=f"product_{sku}_{page+1}"
+                    )
                 )
-            )
-        
-        if nav_buttons:
-            keyboard.append(nav_buttons)
+            
+            if nav_buttons:
+                keyboard.append(nav_buttons)
         
         # Кнопка "К списку товаров"
         keyboard.append([
             InlineKeyboardButton(text="К списку товаров", callback_data="back_to_list")
         ])
+        
+        # Кнопка "Удалить товар" (только для админов)
+        if is_admin(callback.from_user.id):
+            keyboard.append([
+                InlineKeyboardButton(text="🗑 Удалить товар", callback_data=f"confirm_delete_{sku}")
+            ])
         
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
@@ -544,3 +573,157 @@ async def cmd_scan(message: Message):
         "🔄 Запускаю сканирование...\n\n"
         "Это может занять несколько минут"
     )
+
+
+@router.callback_query(F.data.startswith("confirm_delete_"))
+async def confirm_delete_product(callback: CallbackQuery):
+    """Показать окно подтверждения удаления товара"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔️ Доступно только администраторам", show_alert=True)
+        return
+    
+    try:
+        # Извлекаем SKU из callback_data
+        sku = callback.data.replace("confirm_delete_", "")
+        
+        products_db = ProductsDB(Config.DB_PATH)
+        product_sellers_db = ProductSellersDB(Config.DB_PATH)
+        
+        # Получаем информацию о товаре
+        product = await products_db.get_product(sku)
+        if not product:
+            await callback.answer("Товар не найден", show_alert=True)
+            return
+        
+        # Получаем количество продавцов
+        sellers_list = await product_sellers_db.get_sellers_for_product(sku, active_only=True)
+        sellers_count = len(sellers_list)
+        
+        # Формируем сообщение подтверждения
+        title = product.get('title') or 'Без названия'
+        added_at = product.get('added_at', '—')
+        
+        text = "⚠️ <b>Удаление товара</b>\n\n"
+        text += f"<b>Название:</b> {title}\n"
+        text += f"<b>SKU:</b> {hcode(sku)}\n"
+        text += f"<b>Продавцов:</b> {sellers_count}\n"
+        text += f"<b>Добавлен:</b> {added_at}\n\n"
+        text += "❗️ Все связи с продавцами будут удалены.\n\n"
+        text += "<b>Вы уверены?</b>"
+        
+        # Кнопки подтверждения
+        keyboard = [
+            [
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"product_{sku}_1"),
+                InlineKeyboardButton(text="✅ Удалить", callback_data=f"delete_confirmed_{sku}")
+            ]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        await callback.message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в confirm_delete_product: {e}", exc_info=True)
+        await callback.answer("Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("delete_confirmed_"))
+async def delete_product_confirmed(callback: CallbackQuery):
+    """Выполнить удаление товара после подтверждения"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔️ Доступно только администраторам", show_alert=True)
+        return
+    
+    try:
+        # Извлекаем SKU из callback_data
+        sku = callback.data.replace("delete_confirmed_", "")
+        
+        products_db = ProductsDB(Config.DB_PATH)
+        
+        # Получаем название для сообщения
+        product = await products_db.get_product(sku)
+        title = product.get('title', 'Неизвестный товар') if product else 'Неизвестный товар'
+        
+        # Удаляем товар
+        success = await products_db.delete_product(sku)
+        
+        if success:
+            logger.info(f"Товар {sku} удален пользователем {callback.from_user.id}")
+            
+            # Показываем сообщение об успехе
+            await callback.message.edit_text(
+                f"✅ <b>Товар удален</b>\n\n"
+                f"<b>Название:</b> {title}\n"
+                f"<b>SKU:</b> {hcode(sku)}\n\n"
+                f"Все связи с продавцами также удалены.",
+                parse_mode="HTML"
+            )
+            
+            # Через 2 секунды показываем список товаров
+            await callback.answer("Товар успешно удален", show_alert=False)
+            
+            # Возвращаем к списку товаров
+            import asyncio
+            await asyncio.sleep(2)
+            
+            products = await products_db.get_all_products()
+            
+            if not products:
+                await callback.message.edit_text("Нет отслеживаемых товаров")
+                return
+            
+            per_page = 10
+            total = len(products)
+            total_pages = (total + per_page - 1) // per_page
+            products_page = products[:per_page]
+            
+            text = f"<b>Отслеживаемые товары ({total})</b>\n\n"
+            text += f"<i>Нажмите на товар, чтобы увидеть продавцов</i>\n"
+            text += f"Страница 1/{total_pages}\n\n"
+            
+            keyboard = []
+            for product in products_page:
+                title = product.get('title') or 'Без названия'
+                sku = product['master_sku']
+                button_text = title[:35] + '...' if len(title) > 35 else title
+                
+                keyboard.append([
+                    InlineKeyboardButton(
+                        text=button_text,
+                        callback_data=f"product_{sku}_1"
+                    )
+                ])
+            
+            if total_pages > 1:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        text="Вперед ▶️",
+                        callback_data="list_page_2"
+                    )
+                ])
+            
+            reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+            
+            await callback.message.edit_text(
+                text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+            
+        else:
+            await callback.message.edit_text(
+                f"❌ Товар с SKU {hcode(sku)} не найден",
+                parse_mode="HTML"
+            )
+            await callback.answer("Товар не найден", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Ошибка в delete_product_confirmed: {e}", exc_info=True)
+        await callback.message.edit_text("❌ Ошибка при удалении товара")
+        await callback.answer("Ошибка", show_alert=True)

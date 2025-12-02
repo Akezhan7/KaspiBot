@@ -121,13 +121,66 @@ class KaspiParser:
         offers = data.get("offers", [])
         logger.info(f"Получено {len(offers)} offers для SKU={master_sku}")
         
-        # Если есть название товара в корне ответа, сохраняем его
-        product_name = data.get("name") or data.get("productName") or data.get("title")
+        # Ищем название товара в разных полях ответа
+        product_name = None
+        
+        # Сначала пробуем корень ответа
+        product_name = data.get("name") or data.get("productName") or data.get("title") or data.get("product", {}).get("name")
+        
+        # Если не нашли, ищем в offers (проходим по всем, т.к. у первого может быть пустой)
+        if not product_name and offers:
+            for offer in offers:
+                title = offer.get("title", "").strip()
+                if title:  # Нашли непустой title
+                    product_name = title
+                    break
+            
+            # Если все title пустые, пробуем другие поля
+            if not product_name:
+                first_offer = offers[0]
+                product_name = (
+                    first_offer.get("productName") or 
+                    first_offer.get("name")
+                )
+                
+                # Если всё пусто - используем masterCategory как название
+                if not product_name:
+                    master_category = first_offer.get("masterCategory")
+                    if master_category and master_category.startswith("Master - "):
+                        # Убираем префикс "Master - "
+                        product_name = master_category.replace("Master - ", "")
+                    elif master_category:
+                        product_name = master_category
+        
+        # Последний fallback - если совсем ничего не нашли, используем SKU
+        if not product_name:
+            product_name = f"Товар {master_sku}"
+            logger.warning(f"Не найдено название для SKU={master_sku}, используем fallback")
+        
+        # Добавляем название в первый offer для удобства
         if product_name and offers:
-            # Добавляем название в первый offer для удобства
             offers[0]["productName"] = product_name
+            logger.info(f"Найдено название товара: {product_name[:50]}")
         
         return (True, offers)
+    
+    async def get_product_info(self, master_sku: str) -> Optional[Dict[str, Any]]:
+        """
+        Получить информацию о товаре (название, категория и т.д.)
+        
+        Returns:
+            Словарь с информацией о товаре или None
+        """
+        url = Config.KASPI_PRODUCT_URL.format(master_sku=master_sku)
+        logger.info(f"Запрос информации о товаре SKU={master_sku}")
+        
+        success, data = await self._make_request(url, "json", method="GET")
+        
+        if not success or not data:
+            logger.warning(f"Не удалось получить информацию о товаре SKU={master_sku}")
+            return None
+        
+        return data
     
     async def get_merchant_phone(self, merchant_id: str, product_sku: str = "") -> Optional[str]:
         """

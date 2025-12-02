@@ -79,19 +79,43 @@ class ProductScanner:
             # Задержка после запроса товара
             await self.proxy_manager.delay_for_product()
             
-            # Если название товара не было в БД, получим из первого offer
-            if not product_title or product_title == 'Без названия':
+            # Если название товара не было в БД или это fallback, получаем его
+            needs_title_update = (
+                not product_title or 
+                product_title == 'Без названия' or 
+                product_title.startswith('Товар ')  # Fallback название
+            )
+            
+            if needs_title_update:
+                # Сначала пробуем получить из offers (если есть)
                 if offers and len(offers) > 0:
-                    # Пробуем разные поля для названия
                     product_title = (
                         offers[0].get('productName') or 
                         offers[0].get('title') or 
-                        offers[0].get('name') or 
-                        'Без названия'
+                        offers[0].get('name')
                     )
-                    # Обновим название в БД
-                    if product_title != 'Без названия':
-                        await self.products_db.update_product_title(master_sku, product_title)
+                
+                # Если в offers нет названия - запрашиваем через product API
+                if not product_title or product_title == 'Без названия' or product_title.startswith('Товар '):
+                    try:
+                        product_info = await self.parser.get_product_info(master_sku)
+                        await self.proxy_manager.increment_and_check_ip()
+                        await self.proxy_manager.delay_for_product()
+                        
+                        if product_info:
+                            product_title = (
+                                product_info.get('title') or 
+                                product_info.get('name') or 
+                                product_info.get('productName')
+                            )
+                            logger.info(f"Получено название из product API: {product_title}")
+                    except Exception as e:
+                        logger.warning(f"Не удалось получить название через product API: {e}")
+                
+                # Обновим название в БД если нашли нормальное название
+                if product_title and product_title != 'Без названия' and not product_title.startswith('Товар '):
+                    await self.products_db.update_product_title(master_sku, product_title)
+                    logger.info(f"Обновлено название товара {master_sku}: {product_title[:50]}")
             
             # 2. Обработать каждый offer
             active_seller_ids = []
