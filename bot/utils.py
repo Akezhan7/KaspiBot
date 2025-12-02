@@ -43,14 +43,15 @@ def format_new_seller_notification(seller: NewSellerInfo) -> str:
 
 def format_grouped_notifications(sellers: List[NewSellerInfo]) -> str:
     """
-    Форматировать групповое уведомление (10+ новых продавцов)
+    Форматировать групповое уведомление (30+ новых продавцов)
+    Показывает первые 20 продавцов
     """
     count = len(sellers)
     
-    message = f"<b>Найдено {count} новых продавцов</b>\n\n"
+    message = f"<b>🆕 Найдено {count} новых продавцов</b>\n\n"
     
-    # Показываем первые 10
-    for idx, seller in enumerate(sellers[:10], 1):
+    # Показываем первые 20
+    for idx, seller in enumerate(sellers[:20], 1):
         phone_text = seller.phone if seller.phone else "—"
         title = seller.product_title if seller.product_title else "Без названия"
         title_short = title[:40] + '...' if len(title) > 40 else title
@@ -61,8 +62,10 @@ def format_grouped_notifications(sellers: List[NewSellerInfo]) -> str:
             f"   {seller.price:,.0f} ₸  |  {phone_text}\n\n"
         )
     
-    if count > 10:
-        message += f"<i>...и ещё {count - 10}</i>"
+    if count > 20:
+        message += f"<i>...и ещё {count - 20}</i>\n\n"
+    
+    message += "<i>📊 Используйте /list чтобы увидеть всех</i>"
     
     return message
 

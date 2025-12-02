@@ -31,7 +31,7 @@ class NotificationService:
         """
         Отправить уведомления о новых продавцах
         
-        Если 10+ новых - группирует в одно сообщение
+        Если 30+ новых - группирует в одно сообщение
         Если меньше - отправляет по отдельности
         """
         if not sellers:
@@ -41,7 +41,7 @@ class NotificationService:
         logger.info(f"Отправка уведомлений о {count} новых продавцах")
         
         try:
-            if count >= 10:
+            if count >= 30:
                 # Групповое уведомление
                 message = format_grouped_notifications(sellers)
                 await self.send_to_admins(message)

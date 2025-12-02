@@ -49,7 +49,8 @@ class ProxyManager:
             logger.info("Смена IP адреса...")
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(self.change_api_url)
+                # API MobileProxy требует GET запрос
+                response = await client.get(self.change_api_url)
                 response.raise_for_status()
             
             # Сброс счетчика
@@ -57,13 +58,15 @@ class ProxyManager:
             
             # Задержка после смены
             delay = random.uniform(*self.ip_change_delay)
-            logger.info(f"IP изменен. Ожидание {delay:.1f} сек...")
+            logger.info(f"✅ IP успешно изменен. Ожидание {delay:.1f} сек...")
             await asyncio.sleep(delay)
             
             return True
             
         except Exception as e:
-            logger.error(f"Ошибка смены IP: {e}")
+            logger.error(f"❌ Ошибка смены IP: {e}")
+            # Сбрасываем счетчик даже при ошибке, чтобы не зациклиться
+            self.request_counter = 0
             return False
     
     async def should_change_ip(self) -> bool:

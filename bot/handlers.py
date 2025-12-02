@@ -5,17 +5,35 @@ Telegram bot handlers
 import logging
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.markdown import hcode
 
 from config import Config
-from database import ProductsDB, ProductSellersDB, ScanLogsDB, SellersDB
+from database import ProductsDB, ProductSellersDB, ScanLogsDB, SellersDB, RecentSellersDB
 from parser import KaspiParser
 from .utils import validate_kaspi_url, paginate_list
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+# Постоянная клавиатура для пользователей
+def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    """Получить главную клавиатуру с кнопками"""
+    buttons = [
+        [KeyboardButton(text="Мои товары"), KeyboardButton(text="Новые продавцы")],
+        [KeyboardButton(text="Статистика")]
+    ]
+    
+    if is_admin:
+        buttons.append([KeyboardButton(text="Добавить товар"), KeyboardButton(text="Сканировать")])
+    
+    return ReplyKeyboardMarkup(
+        keyboard=buttons,
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие..."
+    )
 
 
 # Проверка админа
@@ -35,17 +53,21 @@ async def cmd_start(message: Message):
         f"Name={message.from_user.full_name}"
     )
     
+    keyboard = get_main_keyboard(is_admin(message.from_user.id))
+    
     await message.answer(
-        "🤖 <b>Kaspi Sellers Monitor</b>\n\n"
+        "<b>Kaspi Sellers Monitor</b>\n\n"
         "Я отслеживаю новых продавцов на товарах Kaspi.kz\n\n"
-        "<b>Команды:</b>\n"
+        "<b>Используйте кнопки ниже или команды:</b>\n"
         "/add <code>&lt;url&gt;</code> — добавить товар\n"
         "/list — список товаров\n"
+        "/recent — последние новые продавцы\n"
         "/remove <code>&lt;sku&gt;</code> — удалить товар\n"
         "/stats — статистика\n"
         "/scan — принудительная проверка (admin)\n\n"
-        "Проверка каждые 6 часов автоматически 🕐",
-        parse_mode="HTML"
+        "Проверка каждые 6 часов автоматически",
+        parse_mode="HTML",
+        reply_markup=keyboard
     )
 
 
@@ -167,6 +189,154 @@ async def cmd_list(message: Message):
         await message.answer("Ошибка получения списка товаров")
 
 
+@router.message(Command("recent"))
+async def cmd_recent(message: Message):
+    """Команда /recent - показать последних новых продавцов"""
+    try:
+        recent_db = RecentSellersDB(Config.DB_PATH)
+        
+        # Показываем первую страницу (20 записей)
+        await show_recent_sellers(message, page=1)
+        
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_recent: {e}", exc_info=True)
+        await message.answer("Ошибка получения истории")
+
+
+async def show_recent_sellers(message: Message, page: int = 1):
+    """Показать последних новых продавцов с пагинацией"""
+    per_page = 20
+    offset = (page - 1) * per_page
+    
+    recent_db = RecentSellersDB(Config.DB_PATH)
+    recent_sellers = await recent_db.get_recent_sellers(limit=per_page, offset=offset)
+    total = await recent_db.get_recent_count()
+    
+    if not recent_sellers:
+        await message.answer("История пуста\n\nНовые продавцы появятся после сканирования")
+        return
+    
+    total_pages = (total + per_page - 1) // per_page
+    
+    text = f"<b>Последние новые продавцы</b>\n\n"
+    text += f"Всего: {total} | Страница {page}/{total_pages}\n\n"
+    text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for idx, seller in enumerate(recent_sellers, offset + 1):
+        product_title = seller.get('product_title') or 'Без названия'
+        merchant_name = seller['merchant_name']
+        price = seller['price']
+        phone = seller.get('phone') or 'недоступен'
+        detected_at = seller['detected_at'][:16]  # YYYY-MM-DD HH:MM
+        
+        # Сокращаем название
+        if len(product_title) > 35:
+            product_title = product_title[:35] + '...'
+        
+        text += f"{idx}. <b>{merchant_name}</b>\n"
+        text += f"   {product_title}\n"
+        text += f"   {price:,.0f} ₸ | <code>{phone}</code>\n"
+        text += f"   <i>{detected_at}</i>\n\n"
+    
+    # Кнопки навигации
+    keyboard = []
+    nav_buttons = []
+    
+    if page > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="Назад",
+                callback_data=f"recent_page_{page-1}"
+            )
+        )
+    
+    if page < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="Вперед",
+                callback_data=f"recent_page_{page+1}"
+            )
+        )
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    
+    await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("recent_page_"))
+async def recent_page_navigation(callback: CallbackQuery):
+    """Навигация по страницам истории"""
+    try:
+        page = int(callback.data.split("_")[-1])
+        
+        per_page = 20
+        offset = (page - 1) * per_page
+        
+        recent_db = RecentSellersDB(Config.DB_PATH)
+        recent_sellers = await recent_db.get_recent_sellers(limit=per_page, offset=offset)
+        total = await recent_db.get_recent_count()
+        
+        if not recent_sellers:
+            await callback.message.edit_text("История пуста")
+            return
+        
+        total_pages = (total + per_page - 1) // per_page
+        
+        text = f"<b>Последние новые продавцы</b>\n\n"
+        text += f"Всего: {total} | Страница {page}/{total_pages}\n\n"
+        text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for idx, seller in enumerate(recent_sellers, offset + 1):
+            product_title = seller.get('product_title') or 'Без названия'
+            merchant_name = seller['merchant_name']
+            price = seller['price']
+            phone = seller.get('phone') or 'недоступен'
+            detected_at = seller['detected_at'][:16]
+            
+            if len(product_title) > 35:
+                product_title = product_title[:35] + '...'
+            
+            text += f"{idx}. <b>{merchant_name}</b>\n"
+            text += f"   {product_title}\n"
+            text += f"   {price:,.0f} ₸ | <code>{phone}</code>\n"
+            text += f"   <i>{detected_at}</i>\n\n"
+        
+        # Кнопки навигации
+        keyboard = []
+        nav_buttons = []
+        
+        if page > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=f"recent_page_{page-1}"
+                )
+            )
+        
+        if page < total_pages:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="Вперед",
+                    callback_data=f"recent_page_{page+1}"
+                )
+            )
+        
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+        
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+        
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в recent_page_navigation: {e}", exc_info=True)
+        await callback.answer("Ошибка", show_alert=True)
+
+
 async def show_products_list(message: Message, products: list, page: int = 1):
     """Показать список товаров с пагинацией"""
     per_page = 10
@@ -203,7 +373,7 @@ async def show_products_list(message: Message, products: list, page: int = 1):
     if page > 1:
         nav_buttons.append(
             InlineKeyboardButton(
-                text="◀️ Назад",
+                text="Назад",
                 callback_data=f"list_page_{page-1}"
             )
         )
@@ -211,7 +381,7 @@ async def show_products_list(message: Message, products: list, page: int = 1):
     if page < total_pages:
         nav_buttons.append(
             InlineKeyboardButton(
-                text="Вперед ▶️",
+                text="Вперед",
                 callback_data=f"list_page_{page+1}"
             )
         )
@@ -279,6 +449,7 @@ async def show_product_sellers(callback: CallbackQuery):
             text += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
             # Показываем продавцов на текущей странице
+            sellers_with_products = []  # Для кнопок с номерами
             for idx, seller_link in enumerate(sellers_page, start_idx + 1):
                 seller_id = seller_link['seller_id']
                 price = seller_link['price']
@@ -291,12 +462,43 @@ async def show_product_sellers(callback: CallbackQuery):
                 merchant_name = seller['merchant_name']
                 phone = seller.get('phone') or 'недоступен'
                 
+                # Получаем список других товаров этого продавца
+                other_products = await product_sellers_db.get_other_products_for_seller(
+                    seller_id, sku
+                )
+                
                 text += f"{idx}. <b>{merchant_name}</b>\n"
                 text += f"   Цена: {price:,.0f} ₸\n"
-                text += f"   Телефон: <code>{phone}</code>\n\n"
+                text += f"   Телефон: <code>{phone}</code>\n"
+                
+                # Показываем информацию о других товарах
+                if other_products:
+                    count = len(other_products)
+                    text += f"   Также на {count} других товарах [нажмите №{idx}]\n"
+                    sellers_with_products.append((idx, seller_id, merchant_name))
+                
+                text += "\n"
         
         # Кнопки навигации
         keyboard = []
+        
+        # Кнопки с номерами продавцов (если есть другие товары)
+        if sellers_with_products:
+            seller_buttons_row = []
+            for idx, seller_id, _ in sellers_with_products:
+                seller_buttons_row.append(
+                    InlineKeyboardButton(
+                        text=f"№{idx}",
+                        callback_data=f"seller_products_{seller_id}_{sku}"
+                    )
+                )
+                # По 5 кнопок в ряд
+                if len(seller_buttons_row) == 5:
+                    keyboard.append(seller_buttons_row)
+                    seller_buttons_row = []
+            # Добавить оставшиеся кнопки
+            if seller_buttons_row:
+                keyboard.append(seller_buttons_row)
         
         # Кнопки навигации только если есть продавцы
         if total > 0:
@@ -307,7 +509,7 @@ async def show_product_sellers(callback: CallbackQuery):
             if page > 1:
                 nav_buttons.append(
                     InlineKeyboardButton(
-                        text="◀️ Назад",
+                        text="Назад",
                         callback_data=f"product_{sku}_{page-1}"
                     )
                 )
@@ -316,7 +518,7 @@ async def show_product_sellers(callback: CallbackQuery):
             if page < total_pages:
                 nav_buttons.append(
                     InlineKeyboardButton(
-                        text="Вперед ▶️",
+                        text="Вперед",
                         callback_data=f"product_{sku}_{page+1}"
                     )
                 )
@@ -332,7 +534,7 @@ async def show_product_sellers(callback: CallbackQuery):
         # Кнопка "Удалить товар" (только для админов)
         if is_admin(callback.from_user.id):
             keyboard.append([
-                InlineKeyboardButton(text="🗑 Удалить товар", callback_data=f"confirm_delete_{sku}")
+                InlineKeyboardButton(text="Удалить товар", callback_data=f"confirm_delete_{sku}")
             ])
         
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -347,6 +549,78 @@ async def show_product_sellers(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка в show_product_sellers: {e}", exc_info=True)
         await callback.answer("Ошибка загрузки продавцов", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("seller_products_"))
+async def show_seller_products(callback: CallbackQuery):
+    """Показать список товаров, на которых есть этот продавец"""
+    try:
+        # Извлекаем seller_id и current_sku из callback_data
+        parts = callback.data.split("_")
+        seller_id = parts[2]
+        current_sku = parts[3]
+        
+        sellers_db = SellersDB(Config.DB_PATH)
+        product_sellers_db = ProductSellersDB(Config.DB_PATH)
+        products_db = ProductsDB(Config.DB_PATH)
+        
+        # Получаем информацию о продавце
+        seller = await sellers_db.get_seller(seller_id)
+        if not seller:
+            await callback.answer("Продавец не найден", show_alert=True)
+            return
+        
+        merchant_name = seller['merchant_name']
+        phone = seller.get('phone') or 'недоступен'
+        
+        # Получаем список других товаров (исключая текущий)
+        other_products = await product_sellers_db.get_other_products_for_seller(
+            seller_id, current_sku
+        )
+        
+        # Формируем сообщение
+        text = f"<b>{merchant_name}</b>\n"
+        text += f"Телефон: <code>{phone}</code>\n\n"
+        text += f"<b>Также продает на товарах:</b>\n\n"
+        
+        if not other_products:
+            text += "<i>Больше нет других товаров</i>\n"
+        else:
+            for idx, prod_link in enumerate(other_products, 1):
+                product_id = prod_link['product_id']
+                price = prod_link['price']
+                
+                # Получаем название товара
+                product = await products_db.get_product(product_id)
+                if product:
+                    title = product.get('title') or 'Без названия'
+                    # Сокращаем название
+                    if len(title) > 40:
+                        title = title[:40] + '...'
+                    
+                    text += f"{idx}. {title}\n"
+                    text += f"   Цена: {price:,.0f} ₸\n\n"
+        
+        # Кнопка "Назад"
+        keyboard = [[
+            InlineKeyboardButton(
+                text="← Назад к товару",
+                callback_data=f"product_{current_sku}_1"
+            )
+        ]]
+        
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        await callback.message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в show_seller_products: {e}", exc_info=True)
+        await callback.answer("Ошибка", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("list_page_"))
@@ -395,7 +669,7 @@ async def list_page_navigation(callback: CallbackQuery):
         if page > 1:
             nav_buttons.append(
                 InlineKeyboardButton(
-                    text="◀️ Назад",
+                    text="Назад",
                     callback_data=f"list_page_{page-1}"
                 )
             )
@@ -403,7 +677,7 @@ async def list_page_navigation(callback: CallbackQuery):
         if page < total_pages:
             nav_buttons.append(
                 InlineKeyboardButton(
-                    text="Вперед ▶️",
+                    text="Вперед",
                     callback_data=f"list_page_{page+1}"
                 )
             )
@@ -464,7 +738,7 @@ async def back_to_list(callback: CallbackQuery):
         if total_pages > 1:
             keyboard.append([
                 InlineKeyboardButton(
-                    text="Вперед ▶️",
+                    text="Вперед",
                     callback_data="list_page_2"
                 )
             ])
@@ -487,7 +761,7 @@ async def back_to_list(callback: CallbackQuery):
 async def cmd_remove(message: Message):
     """Команда /remove <sku>"""
     if not is_admin(message.from_user.id):
-        await message.answer("⛔️ Доступно только администраторам")
+        await message.answer("Доступно только администраторам")
         return
     
     args = message.text.split(maxsplit=1)
@@ -536,22 +810,22 @@ async def cmd_stats(message: Message):
         total_links = await product_sellers_db.get_active_links_count()
         last_scan = await scan_logs_db.get_last_scan()
         
-        text = "📊 <b>Статистика</b>\n\n"
-        text += f"📦 Товаров: {total_products}\n"
-        text += f"🏪 Продавцов: {total_sellers}\n"
-        text += f"🔗 Активных связей: {total_links}\n\n"
+        text = "<b>Статистика</b>\n\n"
+        text += f"Товаров: {total_products}\n"
+        text += f"Продавцов: {total_sellers}\n"
+        text += f"Активных связей: {total_links}\n\n"
         
         if last_scan:
-            text += f"🕐 <b>Последнее сканирование:</b>\n"
+            text += f"<b>Последнее сканирование:</b>\n"
             text += f"   Начато: {last_scan.get('started_at', '—')}\n"
             text += f"   Завершено: {last_scan.get('finished_at', '—')}\n"
             text += f"   Проверено товаров: {last_scan.get('products_checked', 0)}\n"
             text += f"   Новых продавцов: {last_scan.get('new_sellers', 0)}\n"
             
             if last_scan.get('errors'):
-                text += f"   ⚠️ Ошибки: есть\n"
+                text += f"   Ошибки: есть\n"
         else:
-            text += "🕐 Сканирования еще не было\n"
+            text += "Сканирования еще не было\n"
         
         await message.answer(text, parse_mode="HTML")
         
@@ -560,26 +834,14 @@ async def cmd_stats(message: Message):
         await message.answer("Ошибка получения статистики")
 
 
-@router.message(Command("scan"))
-async def cmd_scan(message: Message):
-    """Команда /scan - принудительное сканирование (только админ)"""
-    if not is_admin(message.from_user.id):
-        await message.answer("⛔️ Доступно только администраторам")
-        return
-    
-    # Эта команда будет обрабатываться в main.py
-    # Здесь просто placeholder
-    await message.answer(
-        "🔄 Запускаю сканирование...\n\n"
-        "Это может занять несколько минут"
-    )
+# Команда /scan обрабатывается в main.py для доступа к scanner объекту
 
 
 @router.callback_query(F.data.startswith("confirm_delete_"))
 async def confirm_delete_product(callback: CallbackQuery):
     """Показать окно подтверждения удаления товара"""
     if not is_admin(callback.from_user.id):
-        await callback.answer("⛔️ Доступно только администраторам", show_alert=True)
+        await callback.answer("Доступно только администраторам", show_alert=True)
         return
     
     try:
@@ -603,19 +865,19 @@ async def confirm_delete_product(callback: CallbackQuery):
         title = product.get('title') or 'Без названия'
         added_at = product.get('added_at', '—')
         
-        text = "⚠️ <b>Удаление товара</b>\n\n"
+        text = "<b>Удаление товара</b>\n\n"
         text += f"<b>Название:</b> {title}\n"
         text += f"<b>SKU:</b> {hcode(sku)}\n"
         text += f"<b>Продавцов:</b> {sellers_count}\n"
         text += f"<b>Добавлен:</b> {added_at}\n\n"
-        text += "❗️ Все связи с продавцами будут удалены.\n\n"
+        text += "Все связи с продавцами будут удалены.\n\n"
         text += "<b>Вы уверены?</b>"
         
         # Кнопки подтверждения
         keyboard = [
             [
-                InlineKeyboardButton(text="❌ Отмена", callback_data=f"product_{sku}_1"),
-                InlineKeyboardButton(text="✅ Удалить", callback_data=f"delete_confirmed_{sku}")
+                InlineKeyboardButton(text="Отмена", callback_data=f"product_{sku}_1"),
+                InlineKeyboardButton(text="Удалить", callback_data=f"delete_confirmed_{sku}")
             ]
         ]
         
@@ -637,7 +899,7 @@ async def confirm_delete_product(callback: CallbackQuery):
 async def delete_product_confirmed(callback: CallbackQuery):
     """Выполнить удаление товара после подтверждения"""
     if not is_admin(callback.from_user.id):
-        await callback.answer("⛔️ Доступно только администраторам", show_alert=True)
+        await callback.answer("Доступно только администраторам", show_alert=True)
         return
     
     try:
@@ -658,7 +920,7 @@ async def delete_product_confirmed(callback: CallbackQuery):
             
             # Показываем сообщение об успехе
             await callback.message.edit_text(
-                f"✅ <b>Товар удален</b>\n\n"
+                f"<b>Товар удален</b>\n\n"
                 f"<b>Название:</b> {title}\n"
                 f"<b>SKU:</b> {hcode(sku)}\n\n"
                 f"Все связи с продавцами также удалены.",
@@ -703,7 +965,7 @@ async def delete_product_confirmed(callback: CallbackQuery):
             if total_pages > 1:
                 keyboard.append([
                     InlineKeyboardButton(
-                        text="Вперед ▶️",
+                        text="Вперед",
                         callback_data="list_page_2"
                     )
                 ])
@@ -718,12 +980,139 @@ async def delete_product_confirmed(callback: CallbackQuery):
             
         else:
             await callback.message.edit_text(
-                f"❌ Товар с SKU {hcode(sku)} не найден",
+                f"Товар с SKU {hcode(sku)} не найден",
                 parse_mode="HTML"
             )
             await callback.answer("Товар не найден", show_alert=True)
             
     except Exception as e:
         logger.error(f"Ошибка в delete_product_confirmed: {e}", exc_info=True)
-        await callback.message.edit_text("❌ Ошибка при удалении товара")
+        await callback.message.edit_text("Ошибка при удалении товара")
         await callback.answer("Ошибка", show_alert=True)
+
+
+# ============================================
+# ОБРАБОТЧИКИ КНОПОК ПОСТОЯННОЙ КЛАВИАТУРЫ
+# ============================================
+
+@router.message(F.text == "Мои товары")
+async def button_list_products(message: Message):
+    """Кнопка: Мои товары"""
+    await cmd_list(message)
+
+
+@router.message(F.text == "Новые продавцы")
+async def button_recent_sellers(message: Message):
+    """Кнопка: Новые продавцы"""
+    await cmd_recent(message)
+
+
+@router.message(F.text == "Статистика")
+async def button_stats(message: Message):
+    """Кнопка: Статистика"""
+    await cmd_stats(message)
+
+
+@router.message(F.text == "Добавить товар")
+async def button_add_product(message: Message):
+    """Кнопка: Добавить товар"""
+    if not is_admin(message.from_user.id):
+        await message.answer("Доступно только администраторам")
+        return
+    
+    await message.answer(
+        "<b>Добавление товара</b>\n\n"
+        "Отправьте URL товара с Kaspi.kz\n\n"
+        "<b>Пример:</b>\n"
+        "https://kaspi.kz/shop/p/название-107664472/\n\n"
+        "Или используйте команду:\n"
+        "/add <code>&lt;url&gt;</code>",
+        parse_mode="HTML"
+    )
+
+
+# Кнопка "Сканировать" обрабатывается в main.py для доступа к scanner объекту
+
+
+@router.message(F.text.startswith("https://kaspi.kz"))
+async def handle_kaspi_url(message: Message):
+    """Обработка URL Kaspi (для добавления товара через кнопку)"""
+    if not is_admin(message.from_user.id):
+        await message.answer("Доступно только администраторам")
+        return
+    
+    url = message.text.strip()
+    
+    # Валидация URL
+    if 'kaspi.kz' not in url:
+        await message.answer("Неверный формат URL Kaspi")
+        return
+    
+    # Извлечь master_sku
+    master_sku = await KaspiParser.extract_master_sku_async(url)
+    
+    if not master_sku:
+        await message.answer("Не удалось извлечь SKU из URL")
+        return
+    
+    # Добавить в БД
+    try:
+        products_db = ProductsDB(Config.DB_PATH)
+        
+        # Проверить существование
+        existing = await products_db.get_product(master_sku)
+        if existing:
+            await message.answer(
+                f"Товар уже отслеживается\n\n"
+                f"<b>SKU:</b> {hcode(master_sku)}\n"
+                f"<b>Добавлен:</b> {existing['added_at']}",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Получить название товара
+        product_title = None
+        try:
+            parser = KaspiParser(Config.PROXY_URL)
+            
+            # Сначала пытаемся получить через product API
+            product_info = await parser.get_product_info(master_sku)
+            if product_info:
+                product_title = (
+                    product_info.get('title') or 
+                    product_info.get('name') or 
+                    product_info.get('productName')
+                )
+            
+            # Если не получилось - через offers
+            if not product_title:
+                success, offers = await parser.get_product_offers(master_sku)
+                if success and offers and len(offers) > 0:
+                    product_title = (
+                        offers[0].get('productName') or 
+                        offers[0].get('title') or 
+                        offers[0].get('name')
+                    )
+        except Exception as e:
+            logger.warning(f"Не удалось получить название товара: {e}")
+        
+        # Добавить товар
+        success = await products_db.add_product(master_sku, url, title=product_title)
+        
+        if success:
+            title_text = product_title if product_title else "Без названия"
+            await message.answer(
+                f"<b>Товар добавлен</b>\n\n"
+                f"<b>Название:</b> {title_text}\n"
+                f"<b>SKU:</b> {hcode(master_sku)}\n"
+                f"<b>URL:</b> {url[:50]}...\n\n"
+                f"Будет проверяться каждые 6 часов",
+                parse_mode="HTML"
+            )
+            logger.info(f"Товар {master_sku} добавлен пользователем {message.from_user.id}")
+        else:
+            await message.answer("Ошибка добавления товара")
+            
+    except Exception as e:
+        logger.error(f"Ошибка добавления товара: {e}", exc_info=True)
+        await message.answer("Произошла ошибка при добавлении товара")

@@ -53,11 +53,23 @@ class DatabaseSchema:
         errors TEXT
     );
     
+    -- История новых продавцов (для команды /recent)
+    CREATE TABLE IF NOT EXISTS recent_sellers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id TEXT NOT NULL,
+        seller_id TEXT NOT NULL,
+        price REAL NOT NULL,
+        detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (product_id) REFERENCES products(master_sku) ON DELETE CASCADE,
+        FOREIGN KEY (seller_id) REFERENCES sellers(merchant_id) ON DELETE CASCADE
+    );
+    
     -- Индексы для оптимизации
     CREATE INDEX IF NOT EXISTS idx_product_sellers_product ON product_sellers(product_id);
     CREATE INDEX IF NOT EXISTS idx_product_sellers_seller ON product_sellers(seller_id);
     CREATE INDEX IF NOT EXISTS idx_product_sellers_active ON product_sellers(is_active);
     CREATE INDEX IF NOT EXISTS idx_products_last_checked ON products(last_checked);
+    CREATE INDEX IF NOT EXISTS idx_recent_sellers_detected ON recent_sellers(detected_at DESC);
     """
     
     @staticmethod

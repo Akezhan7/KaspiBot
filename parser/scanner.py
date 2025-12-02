@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from config import Config
-from database import ProductsDB, SellersDB, ProductSellersDB, ScanLogsDB
+from database import ProductsDB, SellersDB, ProductSellersDB, ScanLogsDB, RecentSellersDB
 from parser import ProxyManager, KaspiParser
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,7 @@ class ProductScanner:
         self.sellers_db = SellersDB(self.db_path)
         self.product_sellers_db = ProductSellersDB(self.db_path)
         self.scan_logs_db = ScanLogsDB(self.db_path)
+        self.recent_sellers_db = RecentSellersDB(self.db_path)
         
         # Proxy и parser
         self.proxy_manager = ProxyManager()
@@ -129,6 +130,14 @@ class ProductScanner:
                 if not merchant_id:
                     continue
                 
+                # ПОЛНОЕ ИСКЛЮЧЕНИЕ своих магазинов - не обрабатывать вообще
+                if merchant_name in Config.EXCLUDED_SELLER_NAMES:
+                    logger.debug(
+                        f"⏭ Пропуск исключенного продавца: "
+                        f"{merchant_name} (товар {master_sku})"
+                    )
+                    continue  # Не добавляем в active_seller_ids, не обрабатываем
+                
                 active_seller_ids.append(merchant_id)
                 
                 # 3. Проверить существование продавца
@@ -152,47 +161,43 @@ class ProductScanner:
                 
                 # 5. Если новый или вернулся - добавить в уведомления
                 if is_new or was_inactive:
-                    # Проверить, не является ли продавец исключенным (например, собственный магазин)
-                    is_excluded = merchant_name in Config.EXCLUDED_SELLER_NAMES
+                    # Получить телефон если еще не получили
+                    if phone is None:
+                        seller = await self.sellers_db.get_seller(merchant_id)
+                        phone = seller.get('phone') if seller else None
                     
-                    if is_excluded:
-                        logger.info(
-                            f"Пропуск уведомления для исключенного продавца: "
-                            f"{merchant_name} (товар {master_sku})"
-                        )
-                    else:
-                        # Получить телефон если еще не получили
-                        if phone is None:
-                            seller = await self.sellers_db.get_seller(merchant_id)
-                            phone = seller.get('phone') if seller else None
-                        
-                        # Подсчитать общее количество продавцов
-                        sellers_list = await self.product_sellers_db.get_sellers_for_product(
-                            master_sku, active_only=True
-                        )
-                        total_sellers = len(sellers_list)
-                        
-                        # Получить список других товаров этого продавца
-                        other_products = await self.product_sellers_db.get_other_products_for_seller(
-                            merchant_id, master_sku
-                        )
-                        
-                        # Добавить в список уведомлений
-                        new_seller = NewSellerInfo(
-                            product_sku=master_sku,
-                            product_title=product_title,
-                            merchant_name=merchant_name,
-                            price=price,
-                            phone=phone,
-                            total_sellers=total_sellers,
-                            other_products=other_products
-                        )
-                        self.new_sellers.append(new_seller)
-                        
-                        logger.info(
-                            f"{'Новый' if is_new else 'Вернулся'} продавец: "
-                            f"{merchant_name} для товара {master_sku}"
-                        )
+                    # Подсчитать общее количество продавцов
+                    sellers_list = await self.product_sellers_db.get_sellers_for_product(
+                        master_sku, active_only=True
+                    )
+                    total_sellers = len(sellers_list)
+                    
+                    # Получить список других товаров этого продавца
+                    other_products = await self.product_sellers_db.get_other_products_for_seller(
+                        merchant_id, master_sku
+                    )
+                    
+                    # Добавить в историю новых продавцов
+                    await self.recent_sellers_db.add_recent_seller(
+                        master_sku, merchant_id, price
+                    )
+                    
+                    # Добавить в список уведомлений
+                    new_seller = NewSellerInfo(
+                        product_sku=master_sku,
+                        product_title=product_title,
+                        merchant_name=merchant_name,
+                        price=price,
+                        phone=phone,
+                        total_sellers=total_sellers,
+                        other_products=other_products
+                    )
+                    self.new_sellers.append(new_seller)
+                    
+                    logger.info(
+                        f"{'Новый' if is_new else 'Вернулся'} продавец: "
+                        f"{merchant_name} для товара {master_sku}"
+                    )
             
             # 6. Деактивировать отсутствующих продавцов
             await self.product_sellers_db.deactivate_missing_sellers(

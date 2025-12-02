@@ -95,16 +95,16 @@ async def manual_scan_handler(message):
         
         # Ответ пользователю
         await message.answer(
-            f"✅ <b>Сканирование завершено</b>\n\n"
-            f"📦 Проверено: {result['successful']}/{result['total_products']}\n"
-            f"❌ Ошибок: {result['failed']}\n"
-            f"🆕 Новых продавцов: {result['new_sellers_count']}",
+            f"<b>Сканирование завершено</b>\n\n"
+            f"Проверено: {result['successful']}/{result['total_products']}\n"
+            f"Ошибок: {result['failed']}\n"
+            f"Новых продавцов: {result['new_sellers_count']}",
             parse_mode="HTML"
         )
         
     except Exception as e:
         logger.error(f"Ошибка ручного сканирования: {e}", exc_info=True)
-        await message.answer(f"❌ Ошибка сканирования: {e}")
+        await message.answer(f"Ошибка сканирования: {e}")
 
 
 # === ОСНОВНЫЕ ФУНКЦИИ ===
@@ -122,7 +122,7 @@ async def on_startup():
     
     # Уведомление админов о запуске
     await notification_service.send_to_admins(
-        "✅ <b>Бот запущен</b>\n\n"
+        "<b>Бот запущен</b>\n\n"
         f"Автоматическое сканирование каждые {Config.SCAN_INTERVAL_HOURS} часов"
     )
     
@@ -134,7 +134,7 @@ async def on_shutdown():
     logger = logging.getLogger(__name__)
     logger.info("Остановка бота...")
     
-    await notification_service.send_to_admins("⚠️ <b>Бот остановлен</b>")
+    await notification_service.send_to_admins("<b>Бот остановлен</b>")
 
 
 async def main():
@@ -160,18 +160,37 @@ async def main():
         dp = Dispatcher()
         dp.include_router(router)
         
-        # Добавить обработчик команды /scan
+        # Добавить обработчики команды /scan и кнопки "Сканировать"
         from aiogram.filters import Command
+        from aiogram import F
+        
+        async def handle_scan_request(message):
+            """Общий обработчик для команды /scan и кнопки Сканировать"""
+            from bot.handlers import is_admin
+            if not is_admin(message.from_user.id):
+                await message.answer("Доступно только администраторам")
+                return
+            
+            status_msg = await message.answer(
+                "Запускаю сканирование...\n\n"
+                "Это может занять несколько минут"
+            )
+            
+            try:
+                await manual_scan_handler(message)
+            except Exception as e:
+                logger.error(f"Ошибка при выполнении scan_command: {e}", exc_info=True)
+                await status_msg.edit_text(f"Ошибка: {str(e)}")
         
         @dp.message(Command("scan"))
         async def scan_command(message):
-            from bot.handlers import is_admin
-            if not is_admin(message.from_user.id):
-                await message.answer("⛔️ Доступно только администраторам")
-                return
-            
-            await message.answer("🔄 Запускаю сканирование...")
-            await manual_scan_handler(message)
+            """Обработчик команды /scan"""
+            await handle_scan_request(message)
+        
+        @dp.message(F.text == "Сканировать")
+        async def scan_button(message):
+            """Обработчик кнопки Сканировать"""
+            await handle_scan_request(message)
         
         # Настройка планировщика
         scheduler = AsyncIOScheduler()
