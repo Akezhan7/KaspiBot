@@ -30,7 +30,7 @@ class Config:
     PROXY_CHANGE_API: str = os.getenv("PROXY_CHANGE_API", "")
     
     # === SCANNER ===
-    SCAN_INTERVAL_HOURS: float = float(os.getenv("SCAN_INTERVAL_HOURS", "6"))
+    SCAN_INTERVAL_HOURS: float = float(os.getenv("SCAN_INTERVAL_HOURS", "12"))
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "50"))
     
     # === RATE LIMITS ===

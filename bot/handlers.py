@@ -65,7 +65,7 @@ async def cmd_start(message: Message):
         "/remove <code>&lt;sku&gt;</code> — удалить товар\n"
         "/stats — статистика\n"
         "/scan — принудительная проверка (admin)\n\n"
-        "Проверка каждые 6 часов автоматически",
+        "Проверка каждые 12 часов автоматически",
         parse_mode="HTML",
         reply_markup=keyboard
     )
@@ -158,7 +158,7 @@ async def cmd_add(message: Message):
                 f"<b>Название:</b> {title_text}\n"
                 f"<b>SKU:</b> {hcode(master_sku)}\n"
                 f"<b>URL:</b> {url[:50]}...\n\n"
-                f"Будет проверяться каждые 6 часов",
+                f"Будет проверяться каждые 12 часов",
                 parse_mode="HTML"
             )
             logger.info(f"Товар {master_sku} добавлен пользователем {message.from_user.id}")
@@ -1106,7 +1106,7 @@ async def handle_kaspi_url(message: Message):
                 f"<b>Название:</b> {title_text}\n"
                 f"<b>SKU:</b> {hcode(master_sku)}\n"
                 f"<b>URL:</b> {url[:50]}...\n\n"
-                f"Будет проверяться каждые 6 часов",
+                f"Будет проверяться каждые 12 часов",
                 parse_mode="HTML"
             )
             logger.info(f"Товар {master_sku} добавлен пользователем {message.from_user.id}")
