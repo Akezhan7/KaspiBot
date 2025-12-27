@@ -92,7 +92,7 @@ async def cmd_add(message: Message):
     
     url = args[1].strip()
     
-    # Валидация URL (базовая проверка на kaspi.kz)
+    # Валидация URL (базовая проверка на kaspi.kz или l.kaspi.kz)
     if 'kaspi.kz' not in url:
         await message.answer("Неверный формат URL Kaspi")
         return
@@ -423,6 +423,7 @@ async def show_product_sellers(callback: CallbackQuery):
         sellers_list = await product_sellers_db.get_sellers_for_product(sku, active_only=True)
         
         total = len(sellers_list)
+        sellers_with_products = []  # Инициализируем здесь для использования позже
         
         # Формируем сообщение
         title = product.get('title') or 'Без названия'
@@ -449,7 +450,6 @@ async def show_product_sellers(callback: CallbackQuery):
             text += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
             # Показываем продавцов на текущей странице
-            sellers_with_products = []  # Для кнопок с номерами
             for idx, seller_link in enumerate(sellers_page, start_idx + 1):
                 seller_id = seller_link['seller_id']
                 price = seller_link['price']
@@ -1024,7 +1024,9 @@ async def button_add_product(message: Message):
         "<b>Добавление товара</b>\n\n"
         "Отправьте URL товара с Kaspi.kz\n\n"
         "<b>Пример:</b>\n"
-        "https://kaspi.kz/shop/p/название-107664472/\n\n"
+        "https://kaspi.kz/shop/p/название-107664472/\n"
+        "или\n"
+        "https://l.kaspi.kz/shp/_56n26Vl4X8\n\n"
         "Или используйте команду:\n"
         "/add <code>&lt;url&gt;</code>",
         parse_mode="HTML"
@@ -1034,7 +1036,7 @@ async def button_add_product(message: Message):
 # Кнопка "Сканировать" обрабатывается в main.py для доступа к scanner объекту
 
 
-@router.message(F.text.startswith("https://kaspi.kz"))
+@router.message(F.text.regexp(r"https://(l\.)?kaspi\.kz"))
 async def handle_kaspi_url(message: Message):
     """Обработка URL Kaspi (для добавления товара через кнопку)"""
     if not is_admin(message.from_user.id):
