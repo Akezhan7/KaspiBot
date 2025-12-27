@@ -100,3 +100,79 @@ class SellersDB:
         except Exception as e:
             logger.error(f"Ошибка получения списка продавцов: {e}")
             raise
+    
+    async def get_all_sellers_with_product_count(self) -> List[Dict[str, Any]]:
+        """
+        Получить всех продавцов с количеством активных товаров
+        
+        Returns:
+            List[{"merchant_id", "merchant_name", "phone", "created_at", "product_count"}]
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                query = """
+                    SELECT 
+                        s.*,
+                        COUNT(ps.product_id) as product_count
+                    FROM sellers s
+                    LEFT JOIN product_sellers ps ON s.merchant_id = ps.seller_id 
+                        AND ps.is_active = 1
+                    GROUP BY s.merchant_id
+                    HAVING product_count > 0
+                    ORDER BY product_count DESC, s.merchant_name ASC
+                """
+                
+                async with db.execute(query) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка получения продавцов с подсчетом: {e}")
+            raise
+    
+    async def get_seller_with_products(self, merchant_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Получить продавца со всеми его активными товарами
+        
+        Returns:
+            {
+                "merchant_id": str,
+                "merchant_name": str,
+                "phone": str,
+                "created_at": str,
+                "products": [{"product_id", "title", "url", "price", "last_seen"}]
+            }
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Получаем информацию о продавце
+                seller = await self.get_seller(merchant_id)
+                if not seller:
+                    return None
+                
+                # Получаем товары продавца
+                query = """
+                    SELECT 
+                        p.master_sku as product_id,
+                        p.title,
+                        p.url,
+                        ps.price,
+                        ps.last_seen
+                    FROM product_sellers ps
+                    JOIN products p ON ps.product_id = p.master_sku
+                    WHERE ps.seller_id = ? AND ps.is_active = 1
+                    ORDER BY ps.last_seen DESC
+                """
+                
+                async with db.execute(query, (merchant_id,)) as cursor:
+                    products = await cursor.fetchall()
+                    seller['products'] = [dict(row) for row in products]
+                
+                return seller
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения продавца с товарами {merchant_id}: {e}")
+            raise

@@ -22,8 +22,8 @@ router = Router()
 def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     """Получить главную клавиатуру с кнопками"""
     buttons = [
-        [KeyboardButton(text="Мои товары"), KeyboardButton(text="Новые продавцы")],
-        [KeyboardButton(text="Статистика")]
+        [KeyboardButton(text="Мои товары"), KeyboardButton(text="Все продавцы")],
+        [KeyboardButton(text="Новые продавцы"), KeyboardButton(text="Статистика")]
     ]
     
     if is_admin:
@@ -61,6 +61,7 @@ async def cmd_start(message: Message):
         "<b>Используйте кнопки ниже или команды:</b>\n"
         "/add <code>&lt;url&gt;</code> — добавить товар\n"
         "/list — список товаров\n"
+        "/sellers — все продавцы\n"
         "/recent — последние новые продавцы\n"
         "/remove <code>&lt;sku&gt;</code> — удалить товар\n"
         "/stats — статистика\n"
@@ -1118,3 +1119,249 @@ async def handle_kaspi_url(message: Message):
     except Exception as e:
         logger.error(f"Ошибка добавления товара: {e}", exc_info=True)
         await message.answer("Произошла ошибка при добавлении товара")
+
+
+# ============================================================================
+# РАБОТА С ПРОДАВЦАМИ
+# ============================================================================
+
+@router.message(Command("sellers"))
+async def cmd_sellers(message: Message):
+    """Команда /sellers - показать всех продавцов"""
+    try:
+        await show_sellers_list(message, page=1)
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_sellers: {e}", exc_info=True)
+        await message.answer("Ошибка получения списка продавцов")
+
+
+@router.message(F.text == "Все продавцы")
+async def button_all_sellers(message: Message):
+    """Кнопка 'Все продавцы'"""
+    try:
+        await show_sellers_list(message, page=1)
+    except Exception as e:
+        logger.error(f"Ошибка в button_all_sellers: {e}", exc_info=True)
+        await message.answer("Ошибка получения списка продавцов")
+
+
+async def show_sellers_list(message: Message, page: int = 1):
+    """Показать список всех продавцов с количеством товаров и пагинацией"""
+    per_page = 20
+    
+    sellers_db = SellersDB(Config.DB_PATH)
+    sellers = await sellers_db.get_all_sellers_with_product_count()
+    
+    if not sellers:
+        await message.answer(
+            "<b>Список продавцов пуст</b>\n\n"
+            "Продавцы появятся после добавления товаров и первого сканирования",
+            parse_mode="HTML"
+        )
+        return
+    
+    total = len(sellers)
+    total_pages = (total + per_page - 1) // per_page
+    
+    # Пагинация
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    sellers_page = sellers[start_idx:end_idx]
+    
+    # Формируем сообщение
+    text = f"<b>Все продавцы</b>\n\n"
+    text += f"Всего: {total} | Страница {page}/{total_pages}\n\n"
+    text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Создаем кнопки для каждого продавца
+    keyboard = []
+    
+    for idx, seller in enumerate(sellers_page, start_idx + 1):
+        merchant_name = seller['merchant_name']
+        product_count = seller['product_count']
+        merchant_id = seller['merchant_id']
+        
+        # Сокращаем название если длинное
+        display_name = merchant_name[:35] + '...' if len(merchant_name) > 35 else merchant_name
+        
+        text += f"{idx}. <b>{merchant_name}</b> ({product_count})\n"
+        
+        # Кнопка для открытия продавца
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{display_name} ({product_count})",
+                callback_data=f"seller_{merchant_id}"
+            )
+        ])
+    
+    # Кнопки навигации
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="Назад",
+                callback_data=f"sellers_page_{page-1}"
+            )
+        )
+    
+    if page < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="Вперед",
+                callback_data=f"sellers_page_{page+1}"
+            )
+        )
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("sellers_page_"))
+async def sellers_page_navigation(callback: CallbackQuery):
+    """Навигация по страницам списка продавцов"""
+    try:
+        page = int(callback.data.split("_")[-1])
+        per_page = 20
+        
+        sellers_db = SellersDB(Config.DB_PATH)
+        sellers = await sellers_db.get_all_sellers_with_product_count()
+        
+        if not sellers:
+            await callback.message.edit_text("Список продавцов пуст")
+            return
+        
+        total = len(sellers)
+        total_pages = (total + per_page - 1) // per_page
+        
+        # Пагинация
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        sellers_page = sellers[start_idx:end_idx]
+        
+        # Формируем сообщение
+        text = f"<b>Все продавцы</b>\n\n"
+        text += f"Всего: {total} | Страница {page}/{total_pages}\n\n"
+        text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        # Создаем кнопки
+        keyboard = []
+        
+        for idx, seller in enumerate(sellers_page, start_idx + 1):
+            merchant_name = seller['merchant_name']
+            product_count = seller['product_count']
+            merchant_id = seller['merchant_id']
+            
+            display_name = merchant_name[:35] + '...' if len(merchant_name) > 35 else merchant_name
+            
+            text += f"{idx}. <b>{merchant_name}</b> ({product_count})\n"
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    text=f"{display_name} ({product_count})",
+                    callback_data=f"seller_{merchant_id}"
+                )
+            ])
+        
+        # Навигация
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=f"sellers_page_{page-1}"
+                )
+            )
+        
+        if page < total_pages:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="Вперед",
+                    callback_data=f"sellers_page_{page+1}"
+                )
+            )
+        
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+        
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в sellers_page_navigation: {e}", exc_info=True)
+        await callback.answer("Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("seller_"))
+async def show_seller_details(callback: CallbackQuery):
+    """Показать детали продавца с его товарами"""
+    try:
+        merchant_id = callback.data.replace("seller_", "")
+        
+        sellers_db = SellersDB(Config.DB_PATH)
+        seller_data = await sellers_db.get_seller_with_products(merchant_id)
+        
+        if not seller_data:
+            await callback.answer("Продавец не найден", show_alert=True)
+            return
+        
+        # Формируем сообщение
+        merchant_name = seller_data['merchant_name']
+        phone = seller_data.get('phone') or 'недоступен'
+        products = seller_data.get('products', [])
+        
+        text = f"<b>{merchant_name}</b>\n\n"
+        text += f"<b>Телефон:</b> <code>{phone}</code>\n"
+        text += f"<b>Товаров:</b> {len(products)}\n\n"
+        text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        if not products:
+            text += "<i>У продавца нет активных товаров</i>"
+        else:
+            text += "<b>Товары:</b>\n\n"
+            
+            for idx, product in enumerate(products, 1):
+                title = product.get('title') or 'Без названия'
+                price = product.get('price', 0)
+                product_id = product['product_id']
+                url = product.get('url', '')
+                
+                # Сокращаем название
+                if len(title) > 40:
+                    title = title[:40] + '...'
+                
+                text += f"{idx}. <b>{title}</b>\n"
+                text += f"   {price:,.0f} ₸\n"
+                
+                # Добавляем ссылку на Kaspi
+                if url:
+                    text += f"   <a href='{url}'>Открыть на Kaspi</a>\n"
+                else:
+                    # Если URL нет, создаем базовую ссылку по SKU
+                    kaspi_url = f"https://kaspi.kz/shop/p/{product_id}/"
+                    text += f"   <a href='{kaspi_url}'>Открыть на Kaspi</a>\n"
+                
+                text += f"   <code>SKU: {product_id}</code>\n\n"
+        
+        # Кнопка "Назад к списку"
+        keyboard = [[
+            InlineKeyboardButton(
+                text="Назад к списку",
+                callback_data="sellers_page_1"
+            )
+        ]]
+        
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в show_seller_details: {e}", exc_info=True)
+        await callback.answer("Ошибка", show_alert=True)
+
