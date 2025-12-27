@@ -23,7 +23,8 @@ def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     """Получить главную клавиатуру с кнопками"""
     buttons = [
         [KeyboardButton(text="Мои товары"), KeyboardButton(text="Все продавцы")],
-        [KeyboardButton(text="Новые продавцы"), KeyboardButton(text="Статистика")]
+        [KeyboardButton(text="Новые продавцы"), KeyboardButton(text="Поиск")],
+        [KeyboardButton(text="Статистика")]
     ]
     
     if is_admin:
@@ -61,6 +62,7 @@ async def cmd_start(message: Message):
         "<b>Используйте кнопки ниже или команды:</b>\n"
         "/add <code>&lt;url&gt;</code> — добавить товар\n"
         "/list — список товаров\n"
+        "/search <code>&lt;запрос&gt;</code> — поиск товаров\n"
         "/sellers — все продавцы\n"
         "/recent — последние новые продавцы\n"
         "/remove <code>&lt;sku&gt;</code> — удалить товар\n"
@@ -389,6 +391,14 @@ async def show_products_list(message: Message, products: list, page: int = 1):
     
     if nav_buttons:
         keyboard.append(nav_buttons)
+    
+    # Кнопка поиска
+    keyboard.append([
+        InlineKeyboardButton(
+            text="Поиск товара",
+            callback_data="search_products"
+        )
+    ])
     
     reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
@@ -1365,3 +1375,163 @@ async def show_seller_details(callback: CallbackQuery):
         logger.error(f"Ошибка в show_seller_details: {e}", exc_info=True)
         await callback.answer("Ошибка", show_alert=True)
 
+
+# ============================================================================
+# ПОИСК ТОВАРОВ
+# ============================================================================
+
+@router.message(F.text == "Поиск")
+async def button_search(message: Message):
+    """Кнопка 'Поиск' - показать инструкцию"""
+    await message.answer(
+        "<b>Поиск товаров</b>\n\n"
+        "Отправьте сообщение с запросом для поиска.\n\n"
+        "<b>Примеры:</b>\n"
+        "• Навиен\n"
+        "• для мяса\n"
+        "• 104886899\n"
+        "• Mouse\n\n"
+        "Или используйте команду:\n"
+        "/search <code>&lt;запрос&gt;</code>\n\n"
+        "<i>Поиск не чувствителен к регистру</i>",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("search"))
+async def cmd_search(message: Message):
+    """Команда /search <запрос> - поиск товаров"""
+    # Парсинг аргументов
+    args = message.text.split(maxsplit=1)
+    
+    if len(args) < 2:
+        await message.answer(
+            "<b>Поиск товаров</b>\n\n"
+            "Введите запрос для поиска:\n"
+            "/search <code>&lt;название или SKU&gt;</code>\n\n"
+            "<b>Примеры:</b>\n"
+            "/search Навиен\n"
+            "/search 104886899\n"
+            "/search Mouse",
+            parse_mode="HTML"
+        )
+        return
+    
+    query = args[1].strip()
+    
+    if len(query) < 2:
+        await message.answer("Запрос слишком короткий. Минимум 2 символа.")
+        return
+    
+    try:
+        await perform_search(message, query)
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_search: {e}", exc_info=True)
+        await message.answer("Ошибка при поиске товаров")
+
+
+@router.callback_query(F.data == "search_products")
+async def callback_search_products(callback: CallbackQuery):
+    """Callback для запуска поиска из списка товаров"""
+    await callback.message.answer(
+        "<b>Поиск товаров</b>\n\n"
+        "Отправьте сообщение с запросом для поиска:\n\n"
+        "<b>Примеры:</b>\n"
+        "• Навиен\n"
+        "• 104886899\n"
+        "• Mouse\n\n"
+        "Или используйте команду:\n"
+        "/search <code>&lt;запрос&gt;</code>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+async def perform_search(message: Message, query: str):
+    """Выполнить поиск товаров и показать результаты"""
+    products_db = ProductsDB(Config.DB_PATH)
+    
+    # Выполняем поиск
+    results = await products_db.search_products(query)
+    
+    if not results:
+        await message.answer(
+            f"<b>Поиск: \"{query}\"</b>\n\n"
+            f"Ничего не найдено.\n\n"
+            f"Попробуйте другой запрос или проверьте правильность ввода.",
+            parse_mode="HTML"
+        )
+        return
+    
+    # Формируем сообщение с результатами
+    text = f"<b>Результаты поиска: \"{query}\"</b>\n\n"
+    text += f"Найдено: {len(results)}\n\n"
+    
+    # Создаем кнопки для каждого найденного товара
+    keyboard = []
+    
+    for idx, product in enumerate(results, 1):
+        title = product.get('title') or 'Без названия'
+        sku = product['master_sku']
+        
+        # Сокращаем название
+        display_title = title[:40] + '...' if len(title) > 40 else title
+        
+        # Показываем в тексте первые 10
+        if idx <= 10:
+            text += f"{idx}. <b>{title}</b>\n"
+            text += f"   SKU: <code>{sku}</code>\n\n"
+        
+        # Кнопки для всех результатов
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{idx}. {display_title}",
+                callback_data=f"product_{sku}_1"
+            )
+        ])
+    
+    if len(results) > 10:
+        text += f"<i>...и ещё {len(results) - 10}</i>\n\n"
+    
+    text += "<i>Нажмите на товар, чтобы увидеть продавцов</i>"
+    
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    
+    await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+
+# Универсальный обработчик текста для автоматического поиска
+# Должен быть в конце, чтобы сработал только если другие обработчики не подошли
+@router.message(F.text)
+async def handle_text_search(message: Message):
+    """Обработка обычного текста как поискового запроса"""
+    # Игнорируем команды
+    if message.text.startswith('/'):
+        return
+    
+    # Игнорируем кнопки меню (они уже обработаны выше)
+    menu_buttons = ["Мои товары", "Все продавцы", "Новые продавцы", "Поиск", 
+                    "Статистика", "Добавить товар", "Сканировать"]
+    if message.text in menu_buttons:
+        return
+    
+    # Игнорируем URL Kaspi (они обработаны выше)
+    if 'kaspi.kz' in message.text:
+        return
+    
+    query = message.text.strip()
+    
+    # Минимальная длина запроса
+    if len(query) < 2:
+        await message.answer(
+            "Запрос слишком короткий. Минимум 2 символа.\n\n"
+            "Отправьте название товара или SKU для поиска."
+        )
+        return
+    
+    # Выполняем поиск
+    try:
+        await perform_search(message, query)
+    except Exception as e:
+        logger.error(f"Ошибка при автоматическом поиске: {e}", exc_info=True)
+        await message.answer("Ошибка при поиске товаров")

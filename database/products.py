@@ -132,3 +132,44 @@ class ProductsDB:
         except Exception as e:
             logger.error(f"Ошибка подсчета товаров: {e}")
             raise
+    
+    async def search_products(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Поиск товаров по названию или SKU
+        
+        Args:
+            query: Поисковый запрос (название или SKU)
+        
+        Returns:
+            Список найденных товаров
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Поиск по SKU (точное совпадение) или по названию (частичное)
+                # Регистронезависимый поиск с COLLATE NOCASE
+                search_query = f"%{query}%"
+                
+                async with db.execute(
+                    """
+                    SELECT * FROM products 
+                    WHERE master_sku LIKE ? COLLATE NOCASE 
+                       OR title LIKE ? COLLATE NOCASE
+                    ORDER BY 
+                        CASE 
+                            WHEN master_sku = ? COLLATE NOCASE THEN 1
+                            WHEN master_sku LIKE ? COLLATE NOCASE THEN 2
+                            WHEN title LIKE ? COLLATE NOCASE THEN 3
+                            ELSE 4
+                        END,
+                        added_at DESC
+                    LIMIT 50
+                    """,
+                    (search_query, search_query, query, f"{query}%", f"%{query}%")
+                ) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка поиска товаров по запросу '{query}': {e}")
+            raise
