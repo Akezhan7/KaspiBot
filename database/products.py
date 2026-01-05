@@ -66,6 +66,35 @@ class ProductsDB:
             logger.error(f"Ошибка получения списка товаров: {e}")
             raise
     
+    async def get_all_products_with_sellers_count(self) -> List[Dict[str, Any]]:
+        """
+        Получить все товары с количеством активных продавцов
+        
+        Returns:
+            List[{"master_sku", "url", "title", "added_at", "last_checked", "sellers_count"}]
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                query = """
+                    SELECT 
+                        p.*,
+                        COUNT(ps.seller_id) as sellers_count
+                    FROM products p
+                    LEFT JOIN product_sellers ps ON p.master_sku = ps.product_id 
+                        AND ps.is_active = 1
+                    GROUP BY p.master_sku
+                    ORDER BY sellers_count DESC, p.added_at DESC
+                """
+                
+                async with db.execute(query) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка получения товаров с подсчетом: {e}")
+            raise
+    
     async def delete_product(self, master_sku: str) -> bool:
         """Удалить товар (каскадно удалит связи)"""
         try:
@@ -135,39 +164,50 @@ class ProductsDB:
     
     async def search_products(self, query: str) -> List[Dict[str, Any]]:
         """
-        Поиск товаров по названию или SKU
+        Поиск товаров по названию или SKU (по релевантным словам)
         
         Args:
             query: Поисковый запрос (название или SKU)
         
         Returns:
-            Список найденных товаров
+            Список найденных товаров с подсчетом продавцов
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 
-                # Поиск по SKU (точное совпадение) или по названию (частичное)
-                # Регистронезависимый поиск с COLLATE NOCASE
-                search_query = f"%{query}%"
+                # Разбиваем запрос на слова (минимум 2 символа)
+                words = [w.strip() for w in query.split() if len(w.strip()) >= 2]
                 
-                async with db.execute(
-                    """
-                    SELECT * FROM products 
-                    WHERE master_sku LIKE ? COLLATE NOCASE 
-                       OR title LIKE ? COLLATE NOCASE
-                    ORDER BY 
-                        CASE 
-                            WHEN master_sku = ? COLLATE NOCASE THEN 1
-                            WHEN master_sku LIKE ? COLLATE NOCASE THEN 2
-                            WHEN title LIKE ? COLLATE NOCASE THEN 3
-                            ELSE 4
-                        END,
-                        added_at DESC
+                if not words:
+                    words = [query]
+                
+                # Упрощенный запрос без сложного скоринга
+                # Используем простой LIKE с OR для каждого слова
+                where_conditions = []
+                params = []
+                
+                for word in words:
+                    word_pattern = f"%{word}%"
+                    where_conditions.append("(p.master_sku LIKE ? OR p.title LIKE ?)")
+                    params.extend([word_pattern, word_pattern])
+                
+                where_clause = " OR ".join(where_conditions)
+                
+                query_sql = f"""
+                    SELECT 
+                        p.*,
+                        COUNT(ps.seller_id) as sellers_count
+                    FROM products p
+                    LEFT JOIN product_sellers ps ON p.master_sku = ps.product_id 
+                        AND ps.is_active = 1
+                    WHERE {where_clause}
+                    GROUP BY p.master_sku
+                    ORDER BY sellers_count DESC, p.added_at DESC
                     LIMIT 50
-                    """,
-                    (search_query, search_query, query, f"{query}%", f"%{query}%")
-                ) as cursor:
+                """
+                
+                async with db.execute(query_sql, params) as cursor:
                     rows = await cursor.fetchall()
                     return [dict(row) for row in rows]
         except Exception as e:

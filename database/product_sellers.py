@@ -163,6 +163,54 @@ class ProductSellersDB:
             logger.error(f"Ошибка получения продавцов товара {product_id}: {e}")
             raise
     
+    async def get_sellers_for_product_with_other_count(
+        self, 
+        product_id: str, 
+        active_only: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Получить всех продавцов товара с подсчетом других товаров одним запросом
+        
+        Returns:
+            List[{"seller_id", "price", "merchant_name", "phone", "other_products_count"}]
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Один JOIN запрос подсчитывает другие товары продавца
+                query = """
+                    SELECT 
+                        ps.seller_id,
+                        ps.price,
+                        ps.last_seen,
+                        s.merchant_name,
+                        s.phone,
+                        (
+                            SELECT COUNT(*) 
+                            FROM product_sellers ps2 
+                            WHERE ps2.seller_id = ps.seller_id 
+                            AND ps2.product_id != ps.product_id
+                            AND ps2.is_active = 1
+                        ) as other_products_count
+                    FROM product_sellers ps
+                    JOIN sellers s ON ps.seller_id = s.merchant_id
+                    WHERE ps.product_id = ?
+                """
+                
+                if active_only:
+                    query += " AND ps.is_active = 1"
+                
+                query += " ORDER BY ps.last_seen DESC"
+                
+                async with db.execute(query, (product_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+                    
+        except Exception as e:
+            logger.error(f"Ошибка получения продавцов с подсчетом: {e}")
+            raise
+    
     async def get_total_sellers_count(self) -> int:
         """Получить общее количество уникальных продавцов"""
         try:

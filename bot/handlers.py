@@ -178,7 +178,7 @@ async def cmd_list(message: Message):
     """Команда /list - показать все товары с кнопками (с пагинацией)"""
     try:
         products_db = ProductsDB(Config.DB_PATH)
-        products = await products_db.get_all_products()
+        products = await products_db.get_all_products_with_sellers_count()
         
         if not products:
             await message.answer("Нет отслеживаемых товаров")
@@ -360,14 +360,16 @@ async def show_products_list(message: Message, products: list, page: int = 1):
     for product in products_page:
         title = product.get('title') or 'Без названия'
         sku = product['master_sku']
+        sellers_count = product.get('sellers_count', 0)
         
         # Сокращаем название если длинное
-        button_text = title[:35] + '...' if len(title) > 35 else title
+        display_title = title[:30] + '...' if len(title) > 30 else title
+        button_text = f"{display_title} ({sellers_count})"
         
         keyboard.append([
             InlineKeyboardButton(
                 text=button_text,
-                callback_data=f"product_{sku}_1"
+                callback_data=f"product_{sku}_1_{page}"
             )
         ])
     
@@ -413,16 +415,16 @@ async def show_products_list(message: Message, products: list, page: int = 1):
 async def show_product_sellers(callback: CallbackQuery):
     """Показать продавцов для товара"""
     try:
-        # Извлекаем SKU и страницу из callback_data
+        # Извлекаем SKU, страницу продавцов и страницу списка из callback_data
         parts = callback.data.split("_")
         sku = parts[1]
-        page = int(parts[2]) if len(parts) > 2 else 1
+        sellers_page = int(parts[2]) if len(parts) > 2 else 1
+        list_page = int(parts[3]) if len(parts) > 3 else 1
         
         per_page = 20
         
         products_db = ProductsDB(Config.DB_PATH)
         product_sellers_db = ProductSellersDB(Config.DB_PATH)
-        sellers_db = SellersDB(Config.DB_PATH)
         
         # Получаем информацию о товаре
         product = await products_db.get_product(sku)
@@ -430,8 +432,8 @@ async def show_product_sellers(callback: CallbackQuery):
             await callback.answer("Товар не найден", show_alert=True)
             return
         
-        # Получаем продавцов
-        sellers_list = await product_sellers_db.get_sellers_for_product(sku, active_only=True)
+        # Получаем продавцов с подсчетом других товаров (один запрос вместо N+1)
+        sellers_list = await product_sellers_db.get_sellers_for_product_with_other_count(sku, active_only=True)
         
         total = len(sellers_list)
         sellers_with_products = []  # Инициализируем здесь для использования позже
@@ -452,40 +454,29 @@ async def show_product_sellers(callback: CallbackQuery):
             total_pages = (total + per_page - 1) // per_page
             
             # Вычисляем индексы для пагинации
-            start_idx = (page - 1) * per_page
+            start_idx = (sellers_page - 1) * per_page
             end_idx = start_idx + per_page
-            sellers_page = sellers_list[start_idx:end_idx]
+            sellers_on_page = sellers_list[start_idx:end_idx]
             
             text += f"<b>Всего продавцов:</b> {total}\n"
-            text += f"<b>Страница:</b> {page}/{total_pages}\n\n"
+            text += f"<b>Страница:</b> {sellers_page}/{total_pages}\n\n"
             text += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
             # Показываем продавцов на текущей странице
-            for idx, seller_link in enumerate(sellers_page, start_idx + 1):
+            for idx, seller_link in enumerate(sellers_on_page, start_idx + 1):
                 seller_id = seller_link['seller_id']
                 price = seller_link['price']
-                
-                # Получаем полную информацию о продавце
-                seller = await sellers_db.get_seller(seller_id)
-                if not seller:
-                    continue
-                
-                merchant_name = seller['merchant_name']
-                phone = seller.get('phone') or 'недоступен'
-                
-                # Получаем список других товаров этого продавца
-                other_products = await product_sellers_db.get_other_products_for_seller(
-                    seller_id, sku
-                )
+                merchant_name = seller_link['merchant_name']
+                phone = seller_link.get('phone') or 'недоступен'
+                other_products_count = seller_link.get('other_products_count', 0)
                 
                 text += f"{idx}. <b>{merchant_name}</b>\n"
                 text += f"   Цена: {price:,.0f} ₸\n"
                 text += f"   Телефон: <code>{phone}</code>\n"
                 
                 # Показываем информацию о других товарах
-                if other_products:
-                    count = len(other_products)
-                    text += f"   Также на {count} других товарах [нажмите №{idx}]\n"
+                if other_products_count > 0:
+                    text += f"   Также на {other_products_count} других товарах [нажмите №{idx}]\n"
                     sellers_with_products.append((idx, seller_id, merchant_name))
                 
                 text += "\n"
@@ -517,35 +508,35 @@ async def show_product_sellers(callback: CallbackQuery):
             nav_buttons = []
             
             # Кнопка "Назад" (к предыдущей странице)
-            if page > 1:
+            if sellers_page > 1:
                 nav_buttons.append(
                     InlineKeyboardButton(
                         text="Назад",
-                        callback_data=f"product_{sku}_{page-1}"
+                        callback_data=f"product_{sku}_{sellers_page-1}_{list_page}"
                     )
                 )
             
             # Кнопка "Вперед" (к следующей странице)
-            if page < total_pages:
+            if sellers_page < total_pages:
                 nav_buttons.append(
                     InlineKeyboardButton(
                         text="Вперед",
-                        callback_data=f"product_{sku}_{page+1}"
+                        callback_data=f"product_{sku}_{sellers_page+1}_{list_page}"
                     )
                 )
             
             if nav_buttons:
                 keyboard.append(nav_buttons)
         
-        # Кнопка "К списку товаров"
+        # Кнопка "К списку товаров" с сохранением страницы
         keyboard.append([
-            InlineKeyboardButton(text="К списку товаров", callback_data="back_to_list")
+            InlineKeyboardButton(text="К списку товаров", callback_data=f"back_to_list_{list_page}")
         ])
         
         # Кнопка "Удалить товар" (только для админов)
         if is_admin(callback.from_user.id):
             keyboard.append([
-                InlineKeyboardButton(text="Удалить товар", callback_data=f"confirm_delete_{sku}")
+                InlineKeyboardButton(text="Удалить товар", callback_data=f"confirm_delete_{sku}_{list_page}")
             ])
         
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -641,7 +632,7 @@ async def list_page_navigation(callback: CallbackQuery):
         page = int(callback.data.split("_")[-1])
         
         products_db = ProductsDB(Config.DB_PATH)
-        products = await products_db.get_all_products()
+        products = await products_db.get_all_products_with_sellers_count()
         
         if not products:
             await callback.message.edit_text("Нет отслеживаемых товаров")
@@ -665,13 +656,16 @@ async def list_page_navigation(callback: CallbackQuery):
         for product in products_page:
             title = product.get('title') or 'Без названия'
             sku = product['master_sku']
+            sellers_count = product.get('sellers_count', 0)
             
-            button_text = title[:35] + '...' if len(title) > 35 else title
+            # Сокращаем название если длинное
+            display_title = title[:30] + '...' if len(title) > 30 else title
+            button_text = f"{display_title} ({sellers_count})"
             
             keyboard.append([
                 InlineKeyboardButton(
                     text=button_text,
-                    callback_data=f"product_{sku}_1"
+                    callback_data=f"product_{sku}_1_{page}"
                 )
             ])
         
@@ -696,6 +690,14 @@ async def list_page_navigation(callback: CallbackQuery):
         if nav_buttons:
             keyboard.append(nav_buttons)
         
+        # Кнопка поиска
+        keyboard.append([
+            InlineKeyboardButton(
+                text="Поиск товара",
+                callback_data="search_products"
+            )
+        ])
+        
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
         await callback.message.edit_text(
@@ -710,12 +712,16 @@ async def list_page_navigation(callback: CallbackQuery):
         await callback.answer("Ошибка", show_alert=True)
 
 
-@router.callback_query(F.data == "back_to_list")
+@router.callback_query(F.data.startswith("back_to_list"))
 async def back_to_list(callback: CallbackQuery):
-    """Вернуться к списку товаров (первая страница)"""
+    """Вернуться к списку товаров (на сохраненную страницу)"""
     try:
+        # Извлекаем номер страницы
+        parts = callback.data.split("_")
+        page = int(parts[-1]) if len(parts) > 3 else 1
+        
         products_db = ProductsDB(Config.DB_PATH)
-        products = await products_db.get_all_products()
+        products = await products_db.get_all_products_with_sellers_count()
         
         if not products:
             await callback.message.edit_text("Нет отслеживаемых товаров")
@@ -724,35 +730,68 @@ async def back_to_list(callback: CallbackQuery):
         per_page = 10
         total = len(products)
         total_pages = (total + per_page - 1) // per_page
-        products_page = products[:per_page]
+        
+        # Проверяем, что страница в допустимом диапазоне
+        if page > total_pages:
+            page = total_pages
+        if page < 1:
+            page = 1
+        
+        # Вычисляем индексы для пагинации
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        products_page = products[start_idx:end_idx]
         
         text = f"<b>Отслеживаемые товары ({total})</b>\n\n"
         text += f"<i>Нажмите на товар, чтобы увидеть продавцов</i>\n"
-        text += f"Страница 1/{total_pages}\n\n"
+        text += f"Страница {page}/{total_pages}\n\n"
         
         # Создаем кнопки для товаров на первой странице
         keyboard = []
         for product in products_page:
             title = product.get('title') or 'Без названия'
             sku = product['master_sku']
+            sellers_count = product.get('sellers_count', 0)
             
-            button_text = title[:35] + '...' if len(title) > 35 else title
+            # Сокращаем название если длинное
+            display_title = title[:30] + '...' if len(title) > 30 else title
+            button_text = f"{display_title} ({sellers_count})"
             
             keyboard.append([
                 InlineKeyboardButton(
                     text=button_text,
-                    callback_data=f"product_{sku}_1"
+                    callback_data=f"product_{sku}_1_{page}"
                 )
             ])
         
-        # Кнопка навигации (только "Вперед" если есть следующая страница)
-        if total_pages > 1:
-            keyboard.append([
+        # Кнопки навигации
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=f"list_page_{page-1}"
+                )
+            )
+        
+        if page < total_pages:
+            nav_buttons.append(
                 InlineKeyboardButton(
                     text="Вперед",
-                    callback_data="list_page_2"
+                    callback_data=f"list_page_{page+1}"
                 )
-            ])
+            )
+        
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+        
+        # Кнопка поиска
+        keyboard.append([
+            InlineKeyboardButton(
+                text="Поиск товара",
+                callback_data="search_products"
+            )
+        ])
         
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         
@@ -856,8 +895,10 @@ async def confirm_delete_product(callback: CallbackQuery):
         return
     
     try:
-        # Извлекаем SKU из callback_data
-        sku = callback.data.replace("confirm_delete_", "")
+        # Извлекаем SKU и страницу из callback_data
+        parts = callback.data.split("_")
+        sku = parts[2]  # confirm_delete_{sku}_{page}
+        list_page = int(parts[3]) if len(parts) > 3 else 1
         
         products_db = ProductsDB(Config.DB_PATH)
         product_sellers_db = ProductSellersDB(Config.DB_PATH)
@@ -887,8 +928,8 @@ async def confirm_delete_product(callback: CallbackQuery):
         # Кнопки подтверждения
         keyboard = [
             [
-                InlineKeyboardButton(text="Отмена", callback_data=f"product_{sku}_1"),
-                InlineKeyboardButton(text="Удалить", callback_data=f"delete_confirmed_{sku}")
+                InlineKeyboardButton(text="Отмена", callback_data=f"product_{sku}_1_{list_page}"),
+                InlineKeyboardButton(text="Удалить", callback_data=f"delete_confirmed_{sku}_{list_page}")
             ]
         ]
         
@@ -914,8 +955,10 @@ async def delete_product_confirmed(callback: CallbackQuery):
         return
     
     try:
-        # Извлекаем SKU из callback_data
-        sku = callback.data.replace("delete_confirmed_", "")
+        # Извлекаем SKU и страницу из callback_data
+        parts = callback.data.split("_")
+        sku = parts[2]  # delete_confirmed_{sku}_{page}
+        list_page = int(parts[3]) if len(parts) > 3 else 1
         
         products_db = ProductsDB(Config.DB_PATH)
         
@@ -941,11 +984,11 @@ async def delete_product_confirmed(callback: CallbackQuery):
             # Через 2 секунды показываем список товаров
             await callback.answer("Товар успешно удален", show_alert=False)
             
-            # Возвращаем к списку товаров
+            # Возвращаем к списку товаров на сохраненную страницу
             import asyncio
             await asyncio.sleep(2)
             
-            products = await products_db.get_all_products()
+            products = await products_db.get_all_products_with_sellers_count()
             
             if not products:
                 await callback.message.edit_text("Нет отслеживаемых товаров")
@@ -954,32 +997,66 @@ async def delete_product_confirmed(callback: CallbackQuery):
             per_page = 10
             total = len(products)
             total_pages = (total + per_page - 1) // per_page
-            products_page = products[:per_page]
+            
+            # Проверяем, что страница в допустимом диапазоне
+            if list_page > total_pages:
+                list_page = total_pages
+            if list_page < 1:
+                list_page = 1
+            
+            # Вычисляем индексы для пагинации
+            start_idx = (list_page - 1) * per_page
+            end_idx = start_idx + per_page
+            products_page = products[start_idx:end_idx]
             
             text = f"<b>Отслеживаемые товары ({total})</b>\n\n"
             text += f"<i>Нажмите на товар, чтобы увидеть продавцов</i>\n"
-            text += f"Страница 1/{total_pages}\n\n"
+            text += f"Страница {list_page}/{total_pages}\n\n"
             
             keyboard = []
             for product in products_page:
                 title = product.get('title') or 'Без названия'
                 sku = product['master_sku']
-                button_text = title[:35] + '...' if len(title) > 35 else title
+                sellers_count = product.get('sellers_count', 0)
+                
+                display_title = title[:30] + '...' if len(title) > 30 else title
+                button_text = f"{display_title} ({sellers_count})"
                 
                 keyboard.append([
                     InlineKeyboardButton(
                         text=button_text,
-                        callback_data=f"product_{sku}_1"
+                        callback_data=f"product_{sku}_1_{list_page}"
                     )
                 ])
             
-            if total_pages > 1:
-                keyboard.append([
+            # Кнопки навигации
+            nav_buttons = []
+            if list_page > 1:
+                nav_buttons.append(
+                    InlineKeyboardButton(
+                        text="Назад",
+                        callback_data=f"list_page_{list_page-1}"
+                    )
+                )
+            
+            if list_page < total_pages:
+                nav_buttons.append(
                     InlineKeyboardButton(
                         text="Вперед",
-                        callback_data="list_page_2"
+                        callback_data=f"list_page_{list_page+1}"
                     )
-                ])
+                )
+            
+            if nav_buttons:
+                keyboard.append(nav_buttons)
+            
+            # Кнопка поиска
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="Поиск товара",
+                    callback_data="search_products"
+                )
+            ])
             
             reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
             
@@ -1473,20 +1550,21 @@ async def perform_search(message: Message, query: str):
     for idx, product in enumerate(results, 1):
         title = product.get('title') or 'Без названия'
         sku = product['master_sku']
+        sellers_count = product.get('sellers_count', 0)
         
         # Сокращаем название
-        display_title = title[:40] + '...' if len(title) > 40 else title
+        display_title = title[:35] + '...' if len(title) > 35 else title
         
         # Показываем в тексте первые 10
         if idx <= 10:
-            text += f"{idx}. <b>{title}</b>\n"
+            text += f"{idx}. <b>{title}</b> ({sellers_count})\n"
             text += f"   SKU: <code>{sku}</code>\n\n"
         
-        # Кнопки для всех результатов
+        # Кнопки для всех результатов с количеством продавцов
         keyboard.append([
             InlineKeyboardButton(
-                text=f"{idx}. {display_title}",
-                callback_data=f"product_{sku}_1"
+                text=f"{idx}. {display_title} ({sellers_count})",
+                callback_data=f"product_{sku}_1_1"
             )
         ])
     
