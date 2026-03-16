@@ -5,7 +5,7 @@ Telegram bot handlers
 import logging
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.utils.markdown import hcode
 
 from config import Config
@@ -72,6 +72,41 @@ async def cmd_start(message: Message):
         parse_mode="HTML",
         reply_markup=keyboard
     )
+
+
+@router.message(Command("export_urls"))
+async def cmd_export_urls(message: Message):
+    """Команда /export_urls — выгрузить все URL товаров в txt файл"""
+    if not is_admin(message.from_user.id):
+        await message.answer("Доступно только администраторам")
+        return
+
+    try:
+        products_db = ProductsDB(Config.DB_PATH)
+        products = await products_db.get_all_products()
+
+        if not products:
+            await message.answer("Нет отслеживаемых товаров")
+            return
+
+        urls = []
+        for p in products:
+            url = p.get('url') or f"https://kaspi.kz/shop/p/{p['master_sku']}/"
+            urls.append(url)
+
+        content = "\n".join(urls)
+        file = BufferedInputFile(
+            content.encode("utf-8"),
+            filename=f"kaspi_urls_{len(urls)}.txt"
+        )
+
+        await message.answer_document(
+            file,
+            caption=f"Все URL товаров: {len(urls)} шт."
+        )
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_export_urls: {e}", exc_info=True)
+        await message.answer("Ошибка при выгрузке URL")
 
 
 @router.message(Command("add"))
@@ -1384,70 +1419,138 @@ async def sellers_page_navigation(callback: CallbackQuery):
         await callback.answer("Ошибка", show_alert=True)
 
 
+def _build_seller_details(seller_data: dict, page: int = 1, per_page: int = 10):
+    """Формирует текст и клавиатуру карточки продавца с пагинацией товаров."""
+    merchant_id = seller_data['merchant_id']
+    merchant_name = seller_data['merchant_name']
+    phone = seller_data.get('phone') or 'недоступен'
+    products = seller_data.get('products', [])
+    total = len(products)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    # Защита от выхода за диапазон
+    page = max(1, min(page, total_pages))
+
+    text = f"<b>{merchant_name}</b>\n\n"
+    text += f"<b>Телефон:</b> <code>{phone}</code>\n"
+    text += f"<b>Товаров:</b> {total}\n"
+    if total_pages > 1:
+        text += f"<b>Страница:</b> {page}/{total_pages}\n"
+    text += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    if not products:
+        text += "<i>У продавца нет активных товаров</i>"
+    else:
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_products = products[start_idx:end_idx]
+
+        text += "<b>Товары:</b>\n\n"
+
+        for idx, product in enumerate(page_products, start_idx + 1):
+            title = product.get('title') or 'Без названия'
+            price = product.get('price', 0)
+            product_id = product['product_id']
+            url = product.get('url', '')
+
+            if len(title) > 40:
+                title = title[:40] + '...'
+
+            text += f"{idx}. <b>{title}</b>\n"
+            text += f"   {price:,.0f} ₸\n"
+
+            if url:
+                text += f"   <a href='{url}'>Открыть на Kaspi</a>\n"
+            else:
+                kaspi_url = f"https://kaspi.kz/shop/p/{product_id}/"
+                text += f"   <a href='{kaspi_url}'>Открыть на Kaspi</a>\n"
+
+            text += f"   <code>SKU: {product_id}</code>\n\n"
+
+    # Кнопки навигации по товарам продавца
+    keyboard = []
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="◀ Назад",
+                    callback_data=f"sellerpg_{merchant_id}_{page - 1}"
+                )
+            )
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data="noop"
+            )
+        )
+        if page < total_pages:
+            nav_buttons.append(
+                InlineKeyboardButton(
+                    text="Вперед ▶",
+                    callback_data=f"sellerpg_{merchant_id}_{page + 1}"
+                )
+            )
+        keyboard.append(nav_buttons)
+
+    keyboard.append([
+        InlineKeyboardButton(
+            text="Назад к списку",
+            callback_data="sellers_page_1"
+        )
+    ])
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return text, reply_markup
+
+
+@router.callback_query(F.data.startswith("sellerpg_"))
+async def seller_details_page_navigation(callback: CallbackQuery):
+    """Навигация по страницам товаров продавца"""
+    try:
+        parts = callback.data.split("_")
+        merchant_id = parts[1]
+        page = int(parts[2])
+
+        sellers_db = SellersDB(Config.DB_PATH)
+        seller_data = await sellers_db.get_seller_with_products(merchant_id)
+
+        if not seller_data:
+            await callback.answer("Продавец не найден", show_alert=True)
+            return
+
+        text, reply_markup = _build_seller_details(seller_data, page)
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"Ошибка в seller_details_page_navigation: {e}", exc_info=True)
+        await callback.answer("Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data == "noop")
+async def noop_callback(callback: CallbackQuery):
+    """Пустой callback для неактивных кнопок"""
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("seller_"))
 async def show_seller_details(callback: CallbackQuery):
     """Показать детали продавца с его товарами"""
     try:
         merchant_id = callback.data.replace("seller_", "")
-        
+
         sellers_db = SellersDB(Config.DB_PATH)
         seller_data = await sellers_db.get_seller_with_products(merchant_id)
-        
+
         if not seller_data:
             await callback.answer("Продавец не найден", show_alert=True)
             return
-        
-        # Формируем сообщение
-        merchant_name = seller_data['merchant_name']
-        phone = seller_data.get('phone') or 'недоступен'
-        products = seller_data.get('products', [])
-        
-        text = f"<b>{merchant_name}</b>\n\n"
-        text += f"<b>Телефон:</b> <code>{phone}</code>\n"
-        text += f"<b>Товаров:</b> {len(products)}\n\n"
-        text += "━━━━━━━━━━━━━━━━━━━━\n\n"
-        
-        if not products:
-            text += "<i>У продавца нет активных товаров</i>"
-        else:
-            text += "<b>Товары:</b>\n\n"
-            
-            for idx, product in enumerate(products, 1):
-                title = product.get('title') or 'Без названия'
-                price = product.get('price', 0)
-                product_id = product['product_id']
-                url = product.get('url', '')
-                
-                # Сокращаем название
-                if len(title) > 40:
-                    title = title[:40] + '...'
-                
-                text += f"{idx}. <b>{title}</b>\n"
-                text += f"   {price:,.0f} ₸\n"
-                
-                # Добавляем ссылку на Kaspi
-                if url:
-                    text += f"   <a href='{url}'>Открыть на Kaspi</a>\n"
-                else:
-                    # Если URL нет, создаем базовую ссылку по SKU
-                    kaspi_url = f"https://kaspi.kz/shop/p/{product_id}/"
-                    text += f"   <a href='{kaspi_url}'>Открыть на Kaspi</a>\n"
-                
-                text += f"   <code>SKU: {product_id}</code>\n\n"
-        
-        # Кнопка "Назад к списку"
-        keyboard = [[
-            InlineKeyboardButton(
-                text="Назад к списку",
-                callback_data="sellers_page_1"
-            )
-        ]]
-        
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
-        
+
+        text, reply_markup = _build_seller_details(seller_data, page=1)
         await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
         await callback.answer()
-        
+
     except Exception as e:
         logger.error(f"Ошибка в show_seller_details: {e}", exc_info=True)
         await callback.answer("Ошибка", show_alert=True)
