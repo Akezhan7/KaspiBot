@@ -7,6 +7,9 @@ from .sellers import SellersDB
 from .product_sellers import ProductSellersDB
 from .scan_logs import ScanLogsDB
 from .recent_sellers import RecentSellersDB
+from .seller_workflow import SellerWorkflowDB
+from .message_log import MessageLogDB
+from .legal_requests import LegalRequestsDB
 
 __all__ = [
     'DatabaseSchema',
@@ -15,4 +18,7 @@ __all__ = [
     'ProductSellersDB',
     'ScanLogsDB',
     'RecentSellersDB',
+    'SellerWorkflowDB',
+    'MessageLogDB',
+    'LegalRequestsDB',
 ]

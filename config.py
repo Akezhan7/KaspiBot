@@ -62,6 +62,28 @@ class Config:
     RETRY_ATTEMPTS: int = 3
     RETRY_DELAYS: List[int] = [3, 8, 20]  # секунды между попытками (увеличено для стабильности)
     
+    # === GREEN API (WhatsApp) ===
+    GREEN_API_URL: str = os.getenv("GREEN_API_URL", "https://api.green-api.com")
+    GREEN_API_INSTANCE_ID: str = os.getenv("GREEN_API_INSTANCE_ID", "")
+    GREEN_API_TOKEN: str = os.getenv("GREEN_API_TOKEN", "")
+    WHATSAPP_WEBHOOK_PORT: int = int(os.getenv("WHATSAPP_WEBHOOK_PORT", "8443"))
+    WHATSAPP_WEBHOOK_HOST: str = os.getenv("WHATSAPP_WEBHOOK_HOST", "0.0.0.0")
+
+    # === OPENAI (LLM-классификация) ===
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    LLM_CLASSIFICATION_TIMEOUT: float = float(os.getenv("LLM_CLASSIFICATION_TIMEOUT", "5.0"))
+
+    # === ESCALATION (Планировщик эскалации) ===
+    ESCALATION_INTERVAL_MINUTES: int = int(os.getenv("ESCALATION_INTERVAL_MINUTES", "30"))
+    DIALOG_TIMEOUT_CHECK_HOURS: int = int(os.getenv("DIALOG_TIMEOUT_CHECK_HOURS", "1"))
+    WARN1_TIMEOUT_HOURS: int = int(os.getenv("WARN1_TIMEOUT_HOURS", "24"))
+    WARN2_TIMEOUT_HOURS: int = int(os.getenv("WARN2_TIMEOUT_HOURS", "24"))
+    DIALOG_TIMEOUT_HOURS: int = int(os.getenv("DIALOG_TIMEOUT_HOURS", "24"))
+
+    # === PURCHASE DOCUMENTS ===
+    PURCHASE_DOCUMENTS_DIR: Path = BASE_DIR / "data" / "legal"
+
     # === EXCLUDED SELLERS ===
     # Магазины, которые нужно исключить из уведомлений (например, собственный магазин)
     EXCLUDED_SELLER_NAMES: List[str] = ["PKS Ltd"]
@@ -84,6 +106,12 @@ class Config:
         if not cls.PROXY_CHANGE_API:
             warnings.append("PROXY_CHANGE_API не установлен - ротация IP отключена")
         
+        if not cls.GREEN_API_INSTANCE_ID or not cls.GREEN_API_TOKEN:
+            warnings.append("GREEN_API_INSTANCE_ID/GREEN_API_TOKEN не установлены - WhatsApp отключен")
+        
+        if not cls.OPENAI_API_KEY:
+            warnings.append("OPENAI_API_KEY не установлен - LLM-классификация отключена")
+        
         if errors:
             raise ValueError(
                 "Ошибки конфигурации:\n" + "\n".join(f"- {err}" for err in errors)
@@ -99,6 +127,7 @@ class Config:
     def ensure_dirs(cls) -> None:
         """Создание необходимых директорий"""
         cls.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        cls.PURCHASE_DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Валидация при импорте

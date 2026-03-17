@@ -38,7 +38,7 @@ class NewSellerInfo:
 class ProductScanner:
     """Сканер товаров Kaspi"""
     
-    def __init__(self):
+    def __init__(self, workflow_engine=None):
         self.db_path = Config.DB_PATH
         
         # База данных
@@ -51,6 +51,9 @@ class ProductScanner:
         # Proxy и parser
         self.proxy_manager = ProxyManager()
         self.parser = KaspiParser(self.proxy_manager.get_proxy_url())
+        
+        # Движок воронки (опционально)
+        self.workflow_engine = workflow_engine
         
         # Список новых продавцов для уведомлений
         self.new_sellers: List[NewSellerInfo] = []
@@ -198,6 +201,18 @@ class ProductScanner:
                         f"{'Новый' if is_new else 'Вернулся'} продавец: "
                         f"{merchant_name} для товара {master_sku}"
                     )
+                    
+                    # Интеграция с воронкой
+                    if self.workflow_engine:
+                        try:
+                            await self._notify_workflow_engine(
+                                merchant_id, master_sku, was_inactive
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"Ошибка workflow для {merchant_name}: {e}",
+                                exc_info=True,
+                            )
             
             # 6. Деактивировать отсутствующих продавцов
             await self.product_sellers_db.deactivate_missing_sellers(
@@ -299,3 +314,72 @@ class ProductScanner:
     def get_new_sellers(self) -> List[NewSellerInfo]:
         """Получить список новых продавцов из последнего сканирования"""
         return self.new_sellers
+
+    async def check_seller_on_product(
+        self, seller_id: str, product_id: str
+    ) -> bool:
+        """
+        Точечная проверка: есть ли продавец на конкретном товаре.
+
+        Делает запрос к Kaspi API для получения текущих offers,
+        обновляет связи в БД и проверяет наличие продавца.
+
+        Returns:
+            True если продавец всё ещё на карточке
+        """
+        try:
+            success, offers = await self.parser.get_product_offers(product_id)
+            await self.proxy_manager.increment_and_check_ip()
+
+            if not success or not offers:
+                logger.warning(
+                    f"Микро-скан: не удалось получить offers для {product_id}"
+                )
+                return True  # При ошибке считаем, что всё ещё прилеплен
+
+            active_seller_ids = []
+            for offer in offers:
+                parsed = self.parser.parse_offer(offer)
+                mid = parsed.get("merchant_id")
+                if mid:
+                    active_seller_ids.append(mid)
+
+            # Обновить статусы в БД
+            await self.product_sellers_db.deactivate_missing_sellers(
+                product_id, active_seller_ids
+            )
+
+            return seller_id in active_seller_ids
+
+        except Exception as e:
+            logger.error(
+                f"Ошибка микро-скана для {seller_id} на {product_id}: {e}",
+                exc_info=True,
+            )
+            return True  # При ошибке считаем, что всё ещё прилеплен
+
+    async def _notify_workflow_engine(
+        self, merchant_id: str, product_id: str, was_inactive: bool
+    ) -> None:
+        """
+        Уведомить движок воронки об обнаружении продавца.
+
+        Если продавец ранее был в CLOSED workflow и вернулся — рецидив.
+        Иначе — обычное обнаружение.
+        """
+        from database import SellerWorkflowDB
+
+        workflow_db = SellerWorkflowDB(self.db_path)
+
+        if was_inactive:
+            # Проверяем, был ли продавец ранее закрыт (рецидив)
+            had_closed = await workflow_db.has_closed_workflow(merchant_id)
+            if had_closed:
+                await self.workflow_engine.handle_recidive(
+                    merchant_id, [product_id]
+                )
+                return
+
+        await self.workflow_engine.on_new_seller_detected(
+            merchant_id, [product_id]
+        )

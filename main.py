@@ -14,9 +14,20 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from config import Config
-from database import DatabaseSchema
+from database import (
+    DatabaseSchema,
+    SellerWorkflowDB,
+    MessageLogDB,
+    LegalRequestsDB,
+    SellersDB,
+    ProductsDB,
+    ProductSellersDB,
+)
+from database.migrations import DatabaseMigrations
 from parser import ProductScanner
-from bot import router, NotificationService
+from bot import router, admin_router, NotificationService
+from workflow import WorkflowEngine, EscalationScheduler
+from whatsapp import GreenAPIClient, MessageClassifier
 
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
@@ -50,6 +61,8 @@ def setup_logging():
 bot: Bot = None
 notification_service: NotificationService = None
 scanner: ProductScanner = None
+workflow_engine: WorkflowEngine = None
+escalation_scheduler: EscalationScheduler = None
 
 
 # === ЗАДАЧИ ПЛАНИРОВЩИКА ===
@@ -120,6 +133,12 @@ async def on_startup():
     logger.info("Инициализация базы данных...")
     await DatabaseSchema.init_db(Config.DB_PATH)
     
+    # Применение миграций
+    migrations = DatabaseMigrations(Config.DB_PATH)
+    applied = await migrations.run_migrations()
+    if applied > 0:
+        logger.info(f"Применено {applied} миграций БД")
+    
     # Уведомление админов о запуске
     await notification_service.send_to_admins(
         "<b>Бот запущен</b>\n\n"
@@ -139,7 +158,7 @@ async def on_shutdown():
 
 async def main():
     """Главная функция"""
-    global bot, notification_service, scanner
+    global bot, notification_service, scanner, workflow_engine, escalation_scheduler
     
     # Настройка логирования
     setup_logging()
@@ -156,8 +175,48 @@ async def main():
         notification_service = NotificationService(bot)
         scanner = ProductScanner()
         
+        # Инициализация DAO
+        db_path = str(Config.DB_PATH)
+        workflow_db = SellerWorkflowDB(db_path)
+        message_log_db = MessageLogDB(db_path)
+        legal_db = LegalRequestsDB(db_path)
+        sellers_db = SellersDB(db_path)
+        products_db = ProductsDB(db_path)
+        product_sellers_db = ProductSellersDB(db_path)
+        
+        # Инициализация WhatsApp клиента
+        whatsapp_client = GreenAPIClient(
+            api_url=Config.GREEN_API_URL,
+            instance_id=Config.GREEN_API_INSTANCE_ID,
+            token=Config.GREEN_API_TOKEN,
+        )
+        
+        # Инициализация LLM-классификатора
+        classifier = MessageClassifier(api_key=Config.OPENAI_API_KEY)
+        
+        # Инициализация движка воронки
+        workflow_engine = WorkflowEngine(
+            workflow_db=workflow_db,
+            message_log_db=message_log_db,
+            legal_db=legal_db,
+            sellers_db=sellers_db,
+            products_db=products_db,
+            product_sellers_db=product_sellers_db,
+            whatsapp_client=whatsapp_client,
+            classifier=classifier,
+            notification_service=notification_service,
+            scanner=scanner,
+        )
+        
+        # Передать workflow_engine в scanner для интеграции
+        scanner.workflow_engine = workflow_engine
+        
+        # Инициализация планировщика эскалации
+        escalation_scheduler = EscalationScheduler(workflow_engine)
+        
         # Dispatcher
         dp = Dispatcher()
+        dp.include_router(admin_router)
         dp.include_router(router)
         
         # Добавить обработчики команды /scan и кнопки "Сканировать"
@@ -202,9 +261,52 @@ async def main():
             replace_existing=True
         )
         
+        # Задачи эскалации воронки
+        escalation_interval = Config.ESCALATION_INTERVAL_MINUTES
+        
+        scheduler.add_job(
+            escalation_scheduler.process_new_sellers,
+            trigger=IntervalTrigger(minutes=escalation_interval),
+            id="escalation_new_sellers",
+            name="Эскалация: новые продавцы → WARN1",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            escalation_scheduler.process_warn1_expiry,
+            trigger=IntervalTrigger(minutes=escalation_interval),
+            id="escalation_warn1_expiry",
+            name="Эскалация: WARN1 → WARN2",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            escalation_scheduler.process_warn2_expiry,
+            trigger=IntervalTrigger(minutes=escalation_interval),
+            id="escalation_warn2_expiry",
+            name="Эскалация: WARN2 → LEGAL",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            escalation_scheduler.process_dialog_timeout,
+            trigger=IntervalTrigger(hours=Config.DIALOG_TIMEOUT_CHECK_HOURS),
+            id="escalation_dialog_timeout",
+            name="Эскалация: таймаут диалогов",
+            max_instances=1,
+            coalesce=True,
+            replace_existing=True,
+        )
+        
         # Запуск планировщика
         scheduler.start()
-        logger.info(f"Планировщик запущен: сканирование каждые {Config.SCAN_INTERVAL_HOURS} часов")
+        logger.info(
+            f"Планировщик запущен: сканирование каждые {Config.SCAN_INTERVAL_HOURS}ч, "
+            f"эскалация каждые {Config.ESCALATION_INTERVAL_MINUTES}мин"
+        )
         
         # Startup
         await on_startup()
