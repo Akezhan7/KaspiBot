@@ -6,6 +6,8 @@ import aiosqlite
 from typing import List, Optional, Dict, Any
 import logging
 
+from config import now_kz, now_kz_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,8 +41,8 @@ class MessageLogDB:
                     """
                     INSERT INTO message_log
                         (workflow_id, seller_id, direction, message_text,
-                         template_code, wa_message_id, classification)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                         template_code, wa_message_id, classification, sent_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         workflow_id,
@@ -50,6 +52,7 @@ class MessageLogDB:
                         template_code,
                         wa_message_id,
                         classification,
+                        now_kz_str(),
                     ),
                 )
                 await db.commit()
@@ -138,6 +141,25 @@ class MessageLogDB:
             )
             raise
 
+    async def count_all_outgoing_today(self) -> int:
+        """Подсчёт ВСЕХ исходящих сообщений за сегодня (глобальный лимит)."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("PRAGMA foreign_keys = ON")
+                async with db.execute(
+                    """
+                    SELECT COUNT(*) FROM message_log
+                    WHERE direction = 'OUT'
+                      AND date(sent_at) = date(?)
+                    """,
+                    (now_kz_str(),),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    return row[0] if row else 0
+        except Exception as e:
+            logger.error(f"Ошибка подсчёта всех исходящих за сегодня: {e}")
+            raise
+
     async def count_messages_today(
         self, seller_id: str, direction: str
     ) -> int:
@@ -155,9 +177,9 @@ class MessageLogDB:
                     SELECT COUNT(*) FROM message_log
                     WHERE seller_id = ?
                       AND direction = ?
-                      AND date(sent_at) = date('now')
+                      AND date(sent_at) = date(?)
                     """,
-                    (seller_id, direction),
+                    (seller_id, direction, now_kz_str()),
                 ) as cursor:
                     row = await cursor.fetchone()
                     return row[0] if row else 0

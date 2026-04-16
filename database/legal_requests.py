@@ -6,6 +6,8 @@ import aiosqlite
 from typing import List, Optional, Dict, Any
 import logging
 
+from config import now_kz_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,8 +40,9 @@ class LegalRequestsDB:
                     """
                     INSERT INTO legal_requests
                         (workflow_id, seller_id, shop_name, phone,
-                         product_links, detection_dates, warn_timeline, dialog_log)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                         product_links, detection_dates, warn_timeline, dialog_log,
+                         created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         workflow_id,
@@ -50,6 +53,7 @@ class LegalRequestsDB:
                         detection_dates,
                         warn_timeline,
                         dialog_log,
+                        now_kz_str(),
                     ),
                 )
                 await db.commit()
@@ -129,10 +133,10 @@ class LegalRequestsDB:
                         purchase_notes = COALESCE(?, purchase_notes),
                         purchase_documents = COALESCE(?, purchase_documents),
                         control_purchase_status = 'COMPLETED',
-                        completed_at = CURRENT_TIMESTAMP
+                        completed_at = ?
                     WHERE id = ?
                     """,
-                    (bin_iin, order_number, notes, documents, request_id),
+                    (bin_iin, order_number, notes, documents, now_kz_str(), request_id),
                 )
                 await db.commit()
                 logger.info(

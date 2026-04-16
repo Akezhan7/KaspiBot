@@ -16,9 +16,10 @@ import json
 import logging
 import random
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
-from config import Config
+from config import Config, now_kz
 from database import (
     SellerWorkflowDB,
     MessageLogDB,
@@ -91,15 +92,16 @@ class WorkflowEngine:
 
     async def on_new_seller_detected(
         self, seller_id: str, product_ids: List[str]
-    ) -> int:
+    ) -> int | None:
         """
         Обработка обнаружения нового/вернувшегося продавца.
 
         Если активный workflow уже есть — добавляет товары к нему.
+        Если недавно завершённый workflow — пропускает (cooldown).
         Если нет — создаёт новый.
 
         Returns:
-            workflow_id
+            workflow_id или None если cooldown
         """
         existing = await self._workflow_db.get_active_workflow_for_seller(seller_id)
 
@@ -113,13 +115,32 @@ class WorkflowEngine:
             )
             return workflow_id
 
+        # Проверяем cooldown: не создавать новую воронку,
+        # если предыдущая была завершена недавно
+        recently_completed = await self._workflow_db.has_completed_workflow_recently(
+            seller_id, Config.WORKFLOW_COOLDOWN_DAYS
+        )
+        if recently_completed:
+            logger.info(
+                f"Пропуск продавца {seller_id}: воронка завершена менее "
+                f"{Config.WORKFLOW_COOLDOWN_DAYS} дней назад (cooldown)"
+            )
+            return None
+
         workflow_id = await self._workflow_db.create_workflow(seller_id)
-        for pid in product_ids:
+
+        # Добавить ВСЕ активные товары продавца, а не только текущий
+        all_product_ids = await self._product_sellers_db.get_active_product_ids_for_seller(
+            seller_id
+        )
+        # Объединяем с переданными (на случай если они ещё не в product_sellers)
+        all_ids = list(dict.fromkeys(all_product_ids + product_ids))
+        for pid in all_ids:
             await self._workflow_db.add_product_to_workflow(workflow_id, pid)
 
         logger.info(
             f"Создан workflow {workflow_id} для продавца {seller_id}, "
-            f"товаров: {len(product_ids)}"
+            f"товаров: {len(all_ids)}"
         )
         return workflow_id
 
@@ -149,13 +170,13 @@ class WorkflowEngine:
             )
             return False
 
-        # Антиспам
-        if not await self._can_send_message(seller_id):
-            logger.warning(
-                f"Антиспам: пропуск WARN1 для {seller_id} "
-                f"(лимит исходящих на сегодня)"
-            )
+        # Антиспам (только проверка дневного лимита, т.к. планировщик
+        # эскалации сам контролирует интервал)
+        if not await self._can_send_message(seller_id, skip_interval_check=True):
             return False
+
+        # Подтянуть все активные товары продавца в workflow
+        await self._sync_workflow_products(workflow_id, seller_id)
 
         # Подготовка контекста для шаблона
         context = await self._build_template_context(workflow_id, seller)
@@ -164,7 +185,7 @@ class WorkflowEngine:
         template = get_warn1_template()
         text = render_template(template, context)
 
-        # Отправка
+        # Отправка текста
         try:
             await asyncio.sleep(random.uniform(
                 WHATSAPP_SEND_DELAY_MIN, WHATSAPP_SEND_DELAY_MAX
@@ -181,6 +202,11 @@ class WorkflowEngine:
                 f"Ошибка: {e}"
             )
             return False
+
+        # Отправка документов-вложений (свидетельства об авторском праве)
+        await self._send_warn_documents(
+            phone, Config.WARN1_DOCUMENTS, workflow_id, "WARN1"
+        )
 
         # Обновить статус
         await self._workflow_db.update_status(workflow_id, "WARN1_SENT")
@@ -230,11 +256,11 @@ class WorkflowEngine:
             )
             return False
 
-        if not await self._can_send_message(seller_id):
-            logger.warning(
-                f"Антиспам: пропуск WARN2 для {seller_id}"
-            )
+        if not await self._can_send_message(seller_id, skip_interval_check=True):
             return False
+
+        # Подтянуть все активные товары продавца в workflow
+        await self._sync_workflow_products(workflow_id, seller_id)
 
         context = await self._build_template_context(workflow_id, seller)
 
@@ -261,6 +287,11 @@ class WorkflowEngine:
                 f"Ошибка: {e}"
             )
             return False
+
+        # Отправка документов-вложений (решение суда)
+        await self._send_warn_documents(
+            phone, Config.WARN2_DOCUMENTS, workflow_id, "WARN2"
+        )
 
         await self._workflow_db.update_status(workflow_id, "WARN2_SENT")
 
@@ -565,7 +596,38 @@ class WorkflowEngine:
     # Приватные методы
     # ------------------------------------------------------------------
 
-    async def _can_send_message(self, seller_id: str) -> bool:
+    async def _send_warn_documents(
+        self,
+        phone: str,
+        document_paths: List[Path],
+        workflow_id: int,
+        warn_type: str,
+    ) -> None:
+        """Отправить документы-вложения к WARN-сообщению."""
+        existing_files = [p for p in document_paths if p.exists()]
+        if not existing_files:
+            logger.warning(
+                f"Нет файлов-вложений для {warn_type} "
+                f"(workflow {workflow_id})"
+            )
+            return
+
+        try:
+            await asyncio.sleep(3)
+            await self._whatsapp.send_files(phone, existing_files)
+            logger.info(
+                f"{warn_type} документы отправлены: workflow={workflow_id}, "
+                f"файлов={len(existing_files)}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Ошибка отправки документов {warn_type} "
+                f"для workflow {workflow_id}: {e}"
+            )
+
+    async def _can_send_message(
+        self, seller_id: str, *, skip_interval_check: bool = False
+    ) -> bool:
         """
         Антиспам: проверить, можно ли отправить сообщение продавцу.
 
@@ -583,7 +645,8 @@ class WorkflowEngine:
             return False
 
         # Проверка интервала — последнее исходящее
-        # Используем workflow для поиска, но проверяем по seller
+        if skip_interval_check:
+            return True
         messages = await self._message_log_db.get_messages_for_seller(seller_id)
         if messages:
             last_out = None
@@ -595,7 +658,8 @@ class WorkflowEngine:
             if last_out and last_out.get("sent_at"):
                 try:
                     sent_at = datetime.fromisoformat(last_out["sent_at"])
-                    elapsed = (datetime.now() - sent_at).total_seconds() / 3600
+                    now_local = now_kz().replace(tzinfo=None)
+                    elapsed = (now_local - sent_at).total_seconds() / 3600
                     if elapsed < MIN_HOURS_BETWEEN_MESSAGES:
                         logger.info(
                             f"Антиспам: продавец {seller_id} — "
@@ -606,6 +670,14 @@ class WorkflowEngine:
                     pass
 
         return True
+
+    async def _sync_workflow_products(self, workflow_id: int, seller_id: str) -> None:
+        """Синхронизировать товары workflow с актуальными из product_sellers."""
+        all_product_ids = await self._product_sellers_db.get_active_product_ids_for_seller(
+            seller_id
+        )
+        for pid in all_product_ids:
+            await self._workflow_db.add_product_to_workflow(workflow_id, pid)
 
     async def _build_template_context(
         self, workflow_id: int, seller: Dict
@@ -627,7 +699,7 @@ class WorkflowEngine:
             "product_links": "\n".join(product_lines),
             "our_company": OUR_COMPANY_NAME,
             "deadline": "24 часа",
-            "detection_date": datetime.now().strftime("%d.%m.%Y"),
+            "detection_date": now_kz().strftime("%d.%m.%Y"),
         }
 
     async def _find_seller_by_phone(self, phone: str) -> Optional[Dict]:
@@ -651,7 +723,7 @@ class WorkflowEngine:
         """Сформировать и отправить авто-ответ на входящее сообщение."""
         seller_id = seller["merchant_id"]
 
-        if not await self._can_send_message(seller_id):
+        if not await self._can_send_message(seller_id, skip_interval_check=True):
             logger.info(
                 f"Антиспам: пропуск авто-ответа для {seller_id}"
             )
@@ -674,6 +746,12 @@ class WorkflowEngine:
         except Exception as e:
             logger.error(
                 f"Ошибка отправки авто-ответа для workflow {workflow_id}: {e}"
+            )
+            await self._notifications.send_to_admins(
+                f"⚠️ <b>Ошибка отправки авто-ответа</b>\n\n"
+                f"Продавец: {seller.get('merchant_name')}\n"
+                f"Тип: {classification}\n"
+                f"Ошибка: {e}"
             )
             return
 
@@ -706,7 +784,7 @@ class WorkflowEngine:
         phone = seller.get("phone")
 
         # Отправить промежуточный ответ «проверяем»
-        if phone and await self._can_send_message(seller_id):
+        if phone and await self._can_send_message(seller_id, skip_interval_check=True):
             template = get_auto_reply_template("ALREADY_REMOVED")
             context = await self._build_template_context(workflow_id, seller)
             text = render_template(template, context)
@@ -742,7 +820,7 @@ class WorkflowEngine:
             await self.close_workflow(workflow_id, reason="seller_confirmed_removal")
         else:
             # Продавец всё ещё на карточке
-            if phone and await self._can_send_message(seller_id):
+            if phone and await self._can_send_message(seller_id, skip_interval_check=True):
                 still_text = (
                     "Мы проверили — ваши предложения всё ещё размещены "
                     "на наших карточках товаров.\n\n"

@@ -6,6 +6,8 @@ import aiosqlite
 from typing import List, Optional, Dict, Any
 import logging
 
+from config import now_kz_str
+
 logger = logging.getLogger(__name__)
 
 VALID_STATUSES = {
@@ -38,10 +40,10 @@ class SellerWorkflowDB:
                 await db.execute("PRAGMA foreign_keys = ON")
                 cursor = await db.execute(
                     """
-                    INSERT INTO seller_workflows (seller_id, status)
-                    VALUES (?, 'NEW_SELLER_ATTACH')
+                    INSERT INTO seller_workflows (seller_id, status, created_at, updated_at)
+                    VALUES (?, 'NEW_SELLER_ATTACH', ?, ?)
                     """,
-                    (seller_id,),
+                    (seller_id, now_kz_str(), now_kz_str()),
                 )
                 await db.commit()
                 workflow_id = cursor.lastrowid
@@ -108,23 +110,30 @@ class SellerWorkflowDB:
                 await db.execute("PRAGMA foreign_keys = ON")
 
                 # Определяем дополнительные timestamp-поля
+                now = now_kz_str()
                 extra_set = ""
+                params: list = [new_status, now]
                 if new_status == "WARN1_SENT":
-                    extra_set = ", warn1_sent_at = CURRENT_TIMESTAMP"
+                    extra_set = ", warn1_sent_at = ?"
+                    params.append(now)
                 elif new_status == "WARN2_SENT":
-                    extra_set = ", warn2_sent_at = CURRENT_TIMESTAMP"
+                    extra_set = ", warn2_sent_at = ?"
+                    params.append(now)
                 elif new_status == "DETACHED":
-                    extra_set = ", detached_at = CURRENT_TIMESTAMP"
+                    extra_set = ", detached_at = ?"
+                    params.append(now)
                 elif new_status == "CLOSED":
-                    extra_set = ", closed_at = CURRENT_TIMESTAMP"
+                    extra_set = ", closed_at = ?"
+                    params.append(now)
+                params.append(workflow_id)
 
                 cursor = await db.execute(
                     f"""
                     UPDATE seller_workflows
-                    SET status = ?, updated_at = CURRENT_TIMESTAMP{extra_set}
+                    SET status = ?, updated_at = ?{extra_set}
                     WHERE id = ?
                     """,
-                    (new_status, workflow_id),
+                    params,
                 )
                 await db.commit()
                 updated = cursor.rowcount > 0
@@ -152,23 +161,30 @@ class SellerWorkflowDB:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("PRAGMA foreign_keys = ON")
 
+                now = now_kz_str()
                 extra_set = ""
+                params: list = [new_status, now]
                 if new_status == "WARN1_SENT":
-                    extra_set = ", warn1_sent_at = CURRENT_TIMESTAMP"
+                    extra_set = ", warn1_sent_at = ?"
+                    params.append(now)
                 elif new_status == "WARN2_SENT":
-                    extra_set = ", warn2_sent_at = CURRENT_TIMESTAMP"
+                    extra_set = ", warn2_sent_at = ?"
+                    params.append(now)
                 elif new_status == "DETACHED":
-                    extra_set = ", detached_at = CURRENT_TIMESTAMP"
+                    extra_set = ", detached_at = ?"
+                    params.append(now)
                 elif new_status == "CLOSED":
-                    extra_set = ", closed_at = CURRENT_TIMESTAMP"
+                    extra_set = ", closed_at = ?"
+                    params.append(now)
+                params.extend([workflow_id, expected_status])
 
                 cursor = await db.execute(
                     f"""
                     UPDATE seller_workflows
-                    SET status = ?, updated_at = CURRENT_TIMESTAMP{extra_set}
+                    SET status = ?, updated_at = ?{extra_set}
                     WHERE id = ? AND status = ?
                     """,
-                    (new_status, workflow_id, expected_status),
+                    params,
                 )
                 await db.commit()
                 return cursor.rowcount > 0
@@ -220,10 +236,10 @@ class SellerWorkflowDB:
                     FROM seller_workflows sw
                     JOIN sellers s ON sw.seller_id = s.merchant_id
                     WHERE sw.status = ?
-                      AND sw.updated_at <= datetime('now', ? || ' hours')
+                      AND sw.updated_at <= datetime(?, ? || ' hours')
                     ORDER BY sw.updated_at ASC
                     """,
-                    (status, f"-{older_than_hours}"),
+                    (status, now_kz_str(), f"-{older_than_hours}"),
                 ) as cursor:
                     rows = await cursor.fetchall()
                     return [dict(row) for row in rows]
@@ -243,10 +259,10 @@ class SellerWorkflowDB:
                 await db.execute("PRAGMA foreign_keys = ON")
                 await db.execute(
                     """
-                    INSERT OR IGNORE INTO workflow_products (workflow_id, product_id)
-                    VALUES (?, ?)
+                    INSERT OR IGNORE INTO workflow_products (workflow_id, product_id, detected_at)
+                    VALUES (?, ?, ?)
                     """,
-                    (workflow_id, product_id),
+                    (workflow_id, product_id, now_kz_str()),
                 )
                 await db.commit()
                 logger.debug(
@@ -268,9 +284,11 @@ class SellerWorkflowDB:
                 await db.execute("PRAGMA foreign_keys = ON")
                 async with db.execute(
                     """
-                    SELECT wp.*, p.title, p.url
+                    SELECT wp.*, p.title, p.url, ps.first_seen
                     FROM workflow_products wp
                     JOIN products p ON wp.product_id = p.master_sku
+                    JOIN seller_workflows sw ON wp.workflow_id = sw.id
+                    LEFT JOIN product_sellers ps ON wp.product_id = ps.product_id AND sw.seller_id = ps.seller_id
                     WHERE wp.workflow_id = ?
                     ORDER BY wp.detected_at DESC
                     """,
@@ -372,5 +390,35 @@ class SellerWorkflowDB:
         except Exception as e:
             logger.error(
                 f"Ошибка проверки закрытых workflows для {seller_id}: {e}"
+            )
+            raise
+
+    async def has_completed_workflow_recently(
+        self, seller_id: str, cooldown_days: int = 30
+    ) -> bool:
+        """
+        Проверить, есть ли у продавца завершённая воронка
+        (CLOSED, READY_FOR_LAWSUIT, LEGAL_REQUEST_CREATED) за последние N дней.
+
+        Если есть — новую воронку создавать не нужно.
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("PRAGMA foreign_keys = ON")
+                cutoff = now_kz_str()
+                async with db.execute(
+                    """
+                    SELECT COUNT(*) FROM seller_workflows
+                    WHERE seller_id = ?
+                      AND status IN ('CLOSED', 'READY_FOR_LAWSUIT', 'LEGAL_REQUEST_CREATED')
+                      AND updated_at >= datetime(?, ?)
+                    """,
+                    (seller_id, cutoff, f"-{cooldown_days} days"),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    return (row[0] if row else 0) > 0
+        except Exception as e:
+            logger.error(
+                f"Ошибка проверки недавних workflows для {seller_id}: {e}"
             )
             raise

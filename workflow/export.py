@@ -124,7 +124,7 @@ class EvidenceExporter:
                 label = f" [{template}]" if template else ""
             else:
                 prefix = "←"
-                label = f" ({classification})" if classification else ""
+                label = f" {seller_name}"
 
             lines.append(f"[{timestamp}] {prefix}{label}: {text}")
 
@@ -238,9 +238,9 @@ class EvidenceExporter:
         Генерация полного ZIP-архива с доказательной базой.
 
         Содержимое архива:
-        - legal_request_{id}.json — основные данные заявки
-        - dialog_log_{id}.txt — полный лог переписки
-        - timeline_{id}.json — хронология событий
+        - заявка_{id}.txt — основные данные заявки (читаемый формат)
+        - переписка_{id}.txt — полный лог переписки
+        - хронология_{id}.txt — хронология событий
         - documents/ — документы контрольной закупки (если есть)
 
         Returns:
@@ -253,12 +253,10 @@ class EvidenceExporter:
         workflow_id = request["workflow_id"]
 
         # Собрать все данные
-        legal_json = await self.export_legal_request(request_id, fmt="json")
+        legal_text = await self._export_legal_request_text(request_id)
         dialog_text = await self.export_dialog_log(workflow_id)
         timeline = await self.export_timeline(workflow_id)
-        timeline_json = json.dumps(
-            timeline, ensure_ascii=False, indent=2
-        ).encode("utf-8")
+        timeline_text = self._timeline_to_text(timeline)
 
         # Собрать пути к документам закупки
         purchase_docs = self._parse_purchase_documents(request)
@@ -266,9 +264,9 @@ class EvidenceExporter:
         # Создать ZIP
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(f"legal_request_{request_id}.json", legal_json)
-            zf.writestr(f"dialog_log_{request_id}.txt", dialog_text)
-            zf.writestr(f"timeline_{request_id}.json", timeline_json)
+            zf.writestr(f"заявка_{request_id}.txt", legal_text)
+            zf.writestr(f"переписка_{request_id}.txt", dialog_text)
+            zf.writestr(f"хронология_{request_id}.txt", timeline_text)
 
             # Добавить документы контрольной закупки
             for doc_path in purchase_docs:
@@ -291,7 +289,7 @@ class EvidenceExporter:
                 f"Документы будут разбиты на части."
             )
             return self._split_large_zip(request_id, zip_bytes, purchase_docs,
-                                         legal_json, dialog_text, timeline_json)
+                                         legal_text, dialog_text, timeline_text)
 
         logger.info(
             f"ZIP юрзаявки {request_id}: "
@@ -462,9 +460,9 @@ class EvidenceExporter:
         request_id: int,
         full_zip_bytes: bytes,
         purchase_docs: List[str],
-        legal_json: bytes,
+        legal_text: str,
         dialog_text: str,
-        timeline_json: bytes,
+        timeline_text: str,
     ) -> bytes:
         """
         Разбить большой ZIP на части, чтобы уложиться в лимит Telegram.
@@ -475,15 +473,148 @@ class EvidenceExporter:
         """
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(f"legal_request_{request_id}.json", legal_json)
-            zf.writestr(f"dialog_log_{request_id}.txt", dialog_text)
-            zf.writestr(f"timeline_{request_id}.json", timeline_json)
+            zf.writestr(f"заявка_{request_id}.txt", legal_text)
+            zf.writestr(f"переписка_{request_id}.txt", dialog_text)
+            zf.writestr(f"хронология_{request_id}.txt", timeline_text)
 
         logger.info(
             f"Создана первая часть ZIP юрзаявки {request_id} "
             f"(без документов): {len(zip_buffer.getvalue()) / 1024:.1f} КБ"
         )
         return zip_buffer.getvalue()
+
+    async def _export_legal_request_text(self, request_id: int) -> str:
+        """Экспорт юрзаявки в человекочитаемом текстовом формате."""
+        request = await self._legal_db.get_request(request_id)
+        if not request:
+            raise ValueError(f"Юрзаявка {request_id} не найдена")
+
+        workflow = await self._workflow_db.get_workflow(request["workflow_id"])
+        seller = await self._sellers_db.get_seller(request["seller_id"])
+        products = await self._workflow_db.get_workflow_products(
+            request["workflow_id"]
+        )
+
+        seller_name = seller.get("merchant_name", "?") if seller else "?"
+        seller_phone = seller.get("phone", "—") if seller else "—"
+        merchant_id = request["seller_id"]
+
+        lines = [
+            "=" * 50,
+            f"ЮРИДИЧЕСКАЯ ЗАЯВКА #{request_id}",
+            "=" * 50,
+            "",
+            "--- Информация о продавце ---",
+            f"Магазин: {seller_name}",
+            f"Телефон: {seller_phone or '—'}",
+            f"Merchant ID: {merchant_id}",
+            "",
+            "--- Товары ---",
+        ]
+
+        for i, p in enumerate(products, 1):
+            title = p.get("title", p["product_id"])
+            url = p.get("url", "")
+            detected = self._format_timestamp(p.get("detected_at", ""))
+            attached = "Да" if p.get("still_attached", 1) else "Нет"
+            lines.append(f"  {i}. {title}")
+            if url:
+                lines.append(f"     Ссылка: {url}")
+            lines.append(f"     Обнаружен: {detected}")
+            lines.append(f"     Ещё на карточке: {attached}")
+
+        lines.append("")
+        lines.append("--- Хронология уведомлений ---")
+
+        if workflow:
+            if workflow.get("warn1_sent_at"):
+                lines.append(f"WARN1 отправлен: {self._format_timestamp(workflow['warn1_sent_at'])}")
+            if workflow.get("warn2_sent_at"):
+                lines.append(f"WARN2 отправлен: {self._format_timestamp(workflow['warn2_sent_at'])}")
+
+        lines.append(f"Юрзаявка создана: {self._format_timestamp(request.get('created_at', ''))}")
+
+        status = request.get("control_purchase_status", "PENDING")
+        status_labels = {
+            "PENDING": "Ожидает",
+            "ASSIGNED": "Назначена",
+            "COMPLETED": "Выполнена",
+        }
+        lines.append("")
+        lines.append("--- Контрольная закупка ---")
+        lines.append(f"Статус: {status_labels.get(status, status)}")
+
+        if request.get("bin_iin"):
+            lines.append(f"БИН/ИИН: {request['bin_iin']}")
+        if request.get("purchase_order_number"):
+            lines.append(f"Номер заказа: {request['purchase_order_number']}")
+
+        lines.append("")
+        lines.append("=" * 50)
+        lines.append("PKS Ltd")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _timeline_to_text(timeline: Dict[str, Any]) -> str:
+        """Конвертировать таймлайн в человекочитаемый текст."""
+        seller = timeline.get("seller", {})
+        events = timeline.get("events", [])
+
+        event_labels = {
+            "DETECTED": "Обнаружен прилепала",
+            "PRODUCT_DETECTED": "Обнаружен на товаре",
+            "WARN1_SENT": "Отправлено первое предупреждение (WARN1)",
+            "WARN2_SENT": "Отправлено повторное предупреждение (WARN2)",
+            "SELLER_RESPONSE": "Ответ продавца",
+            "LEGAL_REQUEST": "Создана юридическая заявка",
+            "DETACHED": "Продавец отсоединился",
+            "CLOSED": "Воронка закрыта",
+        }
+
+        lines = [
+            "=" * 50,
+            "ХРОНОЛОГИЯ СОБЫТИЙ",
+            "=" * 50,
+            "",
+            f"Магазин: {seller.get('name', '?')}",
+            f"Телефон: {seller.get('phone', '—')}",
+            f"Статус: {timeline.get('status', '—')}",
+            "",
+            "-" * 40,
+        ]
+
+        for event in events:
+            at = event.get("at", "—")
+            if at and at != "—":
+                try:
+                    dt = datetime.fromisoformat(at)
+                    at = dt.strftime("%d.%m.%Y %H:%M")
+                except (ValueError, TypeError):
+                    pass
+
+            event_type = event.get("event", "")
+            label = event_labels.get(event_type, event_type)
+
+            line = f"[{at}] {label}"
+
+            details = event.get("details", "")
+            if details:
+                line += f" — {details}"
+
+            message = event.get("message", "")
+            if message and event_type == "SELLER_RESPONSE":
+                classification = event.get("classification", "")
+                if classification:
+                    line += f" ({classification})"
+                line += f"\n           \"{message}\""
+
+            lines.append(line)
+
+        lines.append("-" * 40)
+        lines.append(f"\nВсего событий: {len(events)}")
+
+        return "\n".join(lines)
 
     @staticmethod
     def _find_first_message(

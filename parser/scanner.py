@@ -134,7 +134,7 @@ class ProductScanner:
                     continue
                 
                 # ПОЛНОЕ ИСКЛЮЧЕНИЕ своих магазинов - не обрабатывать вообще
-                if merchant_name in Config.EXCLUDED_SELLER_NAMES:
+                if merchant_name.lower() in Config.EXCLUDED_SELLER_NAMES:
                     logger.debug(
                         f"⏭ Пропуск исключенного продавца: "
                         f"{merchant_name} (товар {master_sku})"

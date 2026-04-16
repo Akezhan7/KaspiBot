@@ -8,7 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.utils.markdown import hcode
 
-from config import Config
+from config import Config, now_kz
 from database import ProductsDB, ProductSellersDB, ScanLogsDB, SellersDB, RecentSellersDB
 from parser import KaspiParser
 from .utils import validate_kaspi_url, paginate_list
@@ -482,7 +482,7 @@ async def show_product_sellers(callback: CallbackQuery):
             # Если продавцов нет - показываем это
             text += f"<b>Всего продавцов:</b> 0\n\n"
             text += "━━━━━━━━━━━━━━━━━━━━\n\n"
-            text += "⚠️ <i>Продавцов пока нет.\n"
+            text += "<i>Продавцов пока нет.\n"
             text += "Они появятся после следующего сканирования.</i>\n"
         else:
             # Есть продавцы - показываем их
@@ -1459,6 +1459,16 @@ def _build_seller_details(seller_data: dict, page: int = 1, per_page: int = 10):
             text += f"{idx}. <b>{title}</b>\n"
             text += f"   {price:,.0f} ₸\n"
 
+            first_seen = product.get('first_seen')
+            if first_seen:
+                from datetime import datetime as _dt
+                try:
+                    seen_dt = _dt.fromisoformat(first_seen)
+                    days = (now_kz().replace(tzinfo=None) - seen_dt).days
+                    text += f"   Присоединён: {days} дн.\n"
+                except (ValueError, TypeError):
+                    pass
+
             if url:
                 text += f"   <a href='{url}'>Открыть на Kaspi</a>\n"
             else:
@@ -1474,7 +1484,7 @@ def _build_seller_details(seller_data: dict, page: int = 1, per_page: int = 10):
         if page > 1:
             nav_buttons.append(
                 InlineKeyboardButton(
-                    text="◀ Назад",
+                    text="Назад",
                     callback_data=f"sellerpg_{merchant_id}_{page - 1}"
                 )
             )
@@ -1487,7 +1497,7 @@ def _build_seller_details(seller_data: dict, page: int = 1, per_page: int = 10):
         if page < total_pages:
             nav_buttons.append(
                 InlineKeyboardButton(
-                    text="Вперед ▶",
+                    text="Вперед",
                     callback_data=f"sellerpg_{merchant_id}_{page + 1}"
                 )
             )

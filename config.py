@@ -3,7 +3,9 @@
 Загружает переменные окружения и валидирует настройки
 """
 import os
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from typing import List
 
@@ -12,6 +14,19 @@ load_dotenv()
 
 # Базовая директория проекта
 BASE_DIR = Path(__file__).parent
+
+# Часовой пояс Алматы
+ALMATY_TZ = ZoneInfo("Asia/Almaty")
+
+
+def now_kz() -> datetime:
+    """Текущее время в часовом поясе Алматы."""
+    return datetime.now(ALMATY_TZ)
+
+
+def now_kz_str() -> str:
+    """Текущее время Алматы как строка для SQL."""
+    return now_kz().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class Config:
@@ -64,10 +79,12 @@ class Config:
     
     # === GREEN API (WhatsApp) ===
     GREEN_API_URL: str = os.getenv("GREEN_API_URL", "https://api.green-api.com")
+    GREEN_API_MEDIA_URL: str = os.getenv("GREEN_API_MEDIA_URL", "")
     GREEN_API_INSTANCE_ID: str = os.getenv("GREEN_API_INSTANCE_ID", "")
     GREEN_API_TOKEN: str = os.getenv("GREEN_API_TOKEN", "")
     WHATSAPP_WEBHOOK_PORT: int = int(os.getenv("WHATSAPP_WEBHOOK_PORT", "8443"))
     WHATSAPP_WEBHOOK_HOST: str = os.getenv("WHATSAPP_WEBHOOK_HOST", "0.0.0.0")
+    WHATSAPP_WEBHOOK_IP_WHITELIST: str = os.getenv("WHATSAPP_WEBHOOK_IP_WHITELIST", "")
 
     # === OPENAI (LLM-классификация) ===
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
@@ -75,18 +92,31 @@ class Config:
     LLM_CLASSIFICATION_TIMEOUT: float = float(os.getenv("LLM_CLASSIFICATION_TIMEOUT", "5.0"))
 
     # === ESCALATION (Планировщик эскалации) ===
-    ESCALATION_INTERVAL_MINUTES: int = int(os.getenv("ESCALATION_INTERVAL_MINUTES", "30"))
-    DIALOG_TIMEOUT_CHECK_HOURS: int = int(os.getenv("DIALOG_TIMEOUT_CHECK_HOURS", "1"))
-    WARN1_TIMEOUT_HOURS: int = int(os.getenv("WARN1_TIMEOUT_HOURS", "24"))
-    WARN2_TIMEOUT_HOURS: int = int(os.getenv("WARN2_TIMEOUT_HOURS", "24"))
-    DIALOG_TIMEOUT_HOURS: int = int(os.getenv("DIALOG_TIMEOUT_HOURS", "24"))
+    ESCALATION_INTERVAL_MINUTES: float = float(os.getenv("ESCALATION_INTERVAL_MINUTES", "30"))
+    DIALOG_TIMEOUT_CHECK_HOURS: float = float(os.getenv("DIALOG_TIMEOUT_CHECK_HOURS", "1"))
+    WARN1_TIMEOUT_HOURS: float = float(os.getenv("WARN1_TIMEOUT_HOURS", "24"))
+    WARN2_TIMEOUT_HOURS: float = float(os.getenv("WARN2_TIMEOUT_HOURS", "24"))
+    DIALOG_TIMEOUT_HOURS: float = float(os.getenv("DIALOG_TIMEOUT_HOURS", "24"))
+    WORKFLOW_COOLDOWN_DAYS: int = int(os.getenv("WORKFLOW_COOLDOWN_DAYS", "30"))
+    DAILY_MESSAGE_LIMIT: int = int(os.getenv("DAILY_MESSAGE_LIMIT", "10"))
 
     # === PURCHASE DOCUMENTS ===
     PURCHASE_DOCUMENTS_DIR: Path = BASE_DIR / "data" / "legal"
 
+    # === WARN DOCUMENTS (файлы-вложения к WARN1/WARN2) ===
+    DOCUMENTS_DIR: Path = BASE_DIR / "data" / "documents"
+    WARN1_DOCUMENTS: List[Path] = [
+        BASE_DIR / "data" / "documents" / "copyright_certificate_1.jpg",
+        BASE_DIR / "data" / "documents" / "copyright_certificate_2.jpeg",
+    ]
+    WARN2_DOCUMENTS: List[Path] = [
+        BASE_DIR / "data" / "documents" / "court_decision.pdf",
+    ]
+
     # === EXCLUDED SELLERS ===
     # Магазины, которые нужно исключить из уведомлений (например, собственный магазин)
-    EXCLUDED_SELLER_NAMES: List[str] = ["PKS Ltd"]
+    # Сравнение регистронезависимое — хранить в нижнем регистре
+    EXCLUDED_SELLER_NAMES: List[str] = ["pks ltd", "pks market"]
     
     @classmethod
     def validate(cls) -> None:
@@ -128,6 +158,7 @@ class Config:
         """Создание необходимых директорий"""
         cls.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         cls.PURCHASE_DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        cls.DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Валидация при импорте

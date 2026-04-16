@@ -23,7 +23,7 @@ from aiogram.types import (
     Message,
 )
 
-from config import Config
+from config import Config, now_kz
 from database import LegalRequestsDB, MessageLogDB, SellersDB, SellerWorkflowDB
 
 logger = logging.getLogger(__name__)
@@ -76,18 +76,17 @@ def _docs_dir(request_id: int) -> Path:
 @admin_router.message(Command("assign_purchase"))
 async def cmd_assign_purchase(message: Message) -> None:
     """
-    /assign_purchase <request_id> <@username>
-    Назначить контрольную закупку ответственному лицу.
+    /assign_purchase <request_id>
+    Назначить контрольную закупку. Ответственный определяется автоматически.
     """
     if not _is_admin(message.from_user.id):
         await message.answer("Доступно только администраторам")
         return
 
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 3:
+    parts = message.text.split()
+    if len(parts) < 2:
         await message.answer(
-            "Формат: /assign_purchase <code>&lt;request_id&gt;</code> "
-            "<code>&lt;@username&gt;</code>",
+            "Формат: /assign_purchase <code>&lt;request_id&gt;</code>",
             parse_mode="HTML",
         )
         return
@@ -98,7 +97,8 @@ async def cmd_assign_purchase(message: Message) -> None:
         await message.answer("ID заявки должен быть числом")
         return
 
-    assigned_to = parts[2].strip()
+    user = message.from_user
+    assigned_to = f"@{user.username}" if user.username else user.full_name
 
     legal_db = _get_legal_db()
     req = await legal_db.get_request(request_id)
@@ -119,14 +119,24 @@ async def cmd_assign_purchase(message: Message) -> None:
     workflow_id = req["workflow_id"]
     await workflow_db.update_status(workflow_id, "CONTROL_PURCHASE_REQUIRED")
 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Ввести данные закупки",
+            callback_data=f"wf_purchdone_{request_id}",
+        )],
+        [InlineKeyboardButton(
+            text="Воронка",
+            callback_data=f"wf_view_{workflow_id}",
+        )],
+    ])
+
     await message.answer(
-        f"✅ <b>Закупка назначена</b>\n\n"
+        f"<b>Закупка назначена</b>\n\n"
         f"Заявка: #{request_id}\n"
         f"Магазин: {req.get('shop_name', '—')}\n"
-        f"Ответственный: {assigned_to}\n\n"
-        f"Для ввода данных после закупки: "
-        f"/purchase_done {request_id}",
+        f"Ответственный: {assigned_to}",
         parse_mode="HTML",
+        reply_markup=keyboard,
     )
 
     logger.info(
@@ -181,12 +191,19 @@ async def cmd_purchase_done(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(PurchaseDataFSM.waiting_bin)
 
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Отменить ввод",
+            callback_data="purchase_cancel",
+        )],
+    ])
+
     await message.answer(
-        f"📋 <b>Ввод данных закупки — заявка #{request_id}</b>\n"
+        f"<b>Ввод данных закупки — заявка #{request_id}</b>\n"
         f"Магазин: {req.get('shop_name', '—')}\n\n"
-        f"<b>Шаг 1/4:</b> Введите БИН/ИИН продавца\n\n"
-        f"Для отмены: /cancel_purchase",
+        f"<b>Шаг 1/4:</b> Введите БИН/ИИН продавца",
         parse_mode="HTML",
+        reply_markup=cancel_kb,
     )
 
 
@@ -201,7 +218,22 @@ async def cmd_cancel_purchase(message: Message, state: FSMContext) -> None:
         return
 
     await state.clear()
-    await message.answer("❌ Ввод данных закупки отменён")
+    await message.answer("Ввод данных закупки отменён")
+
+
+# === Отмена через inline-кнопку ===
+
+@admin_router.callback_query(F.data == "purchase_cancel")
+async def cb_cancel_purchase(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отменить ввод данных контрольной закупки через inline-кнопку."""
+    await callback.answer()
+    current_state = await state.get_state()
+    if current_state is None:
+        await callback.message.answer("Нет активного ввода данных для отмены")
+        return
+
+    await state.clear()
+    await callback.message.answer("Ввод данных закупки отменён")
 
 
 # === FSM: Шаг 1 — БИН/ИИН ===
@@ -214,9 +246,16 @@ async def fsm_process_bin(message: Message, state: FSMContext) -> None:
     # Валидация: БИН — 12 цифр, ИИН — 12 цифр
     clean = bin_iin.replace(" ", "").replace("-", "")
     if not clean.isdigit() or len(clean) != 12:
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="Отменить ввод",
+                callback_data="purchase_cancel",
+            )],
+        ])
         await message.answer(
-            "⚠️ БИН/ИИН должен содержать 12 цифр.\n"
-            "Попробуйте ещё раз или /cancel_purchase для отмены"
+            "БИН/ИИН должен содержать 12 цифр.\n"
+            "Попробуйте ещё раз.",
+            reply_markup=cancel_kb,
         )
         return
 
@@ -224,7 +263,7 @@ async def fsm_process_bin(message: Message, state: FSMContext) -> None:
     await state.set_state(PurchaseDataFSM.waiting_order)
 
     await message.answer(
-        f"✅ БИН/ИИН: <code>{clean}</code>\n\n"
+        f"БИН/ИИН: <code>{clean}</code>\n\n"
         f"<b>Шаг 2/4:</b> Введите номер заказа Kaspi",
         parse_mode="HTML",
     )
@@ -238,21 +277,21 @@ async def fsm_process_order(message: Message, state: FSMContext) -> None:
     order_number = message.text.strip()
 
     if not order_number:
-        await message.answer("⚠️ Введите номер заказа")
+        await message.answer("Введите номер заказа")
         return
 
     await state.update_data(order_number=order_number)
     await state.set_state(PurchaseDataFSM.waiting_docs)
 
     await message.answer(
-        f"✅ Заказ: <code>{order_number}</code>\n\n"
+        f"Заказ: <code>{order_number}</code>\n\n"
         f"<b>Шаг 3/4:</b> Отправьте скриншоты/документы\n"
         f"(фото или файлы — можно несколько)\n\n"
         f"Когда все документы будут отправлены, нажмите кнопку:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
-                text="📎 Документы загружены",
+                text="Документы загружены",
                 callback_data="purchase_docs_done",
             )],
         ]),
@@ -280,7 +319,7 @@ async def fsm_process_photo(message: Message, state: FSMContext, bot: Bot) -> No
     await state.update_data(doc_paths=doc_paths)
 
     await message.answer(
-        f"📷 Фото сохранено ({len(doc_paths)} шт.)\n"
+        f"Фото сохранено ({len(doc_paths)} шт.)\n"
         f"Отправьте ещё или нажмите «Документы загружены»"
     )
 
@@ -320,7 +359,7 @@ async def fsm_process_document(message: Message, state: FSMContext, bot: Bot) ->
     await state.update_data(doc_paths=doc_paths)
 
     await message.answer(
-        f"📄 Файл сохранён: {safe_name} ({len(doc_paths)} шт.)\n"
+        f"Файл сохранён: {safe_name} ({len(doc_paths)} шт.)\n"
         f"Отправьте ещё или нажмите «Документы загружены»"
     )
 
@@ -340,7 +379,7 @@ async def fsm_docs_done(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(PurchaseDataFSM.waiting_notes)
 
     await callback.message.answer(
-        f"✅ Документов: {doc_count}\n\n"
+        f"Документов: {doc_count}\n\n"
         f"<b>Шаг 4/4:</b> Добавьте комментарий (или отправьте «-» чтобы пропустить)",
         parse_mode="HTML",
     )
@@ -363,7 +402,7 @@ async def fsm_process_notes(message: Message, state: FSMContext) -> None:
     # Показать сводку для подтверждения
     doc_count = len(data.get("doc_paths", []))
     summary = (
-        f"📋 <b>Подтвердите данные закупки</b>\n\n"
+        f"<b>Подтвердите данные закупки</b>\n\n"
         f"Заявка: #{data['request_id']}\n"
         f"Магазин: {data.get('shop_name', '—')}\n"
         f"БИН/ИИН: <code>{data['bin_iin']}</code>\n"
@@ -378,11 +417,11 @@ async def fsm_process_notes(message: Message, state: FSMContext) -> None:
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Подтвердить",
+                    text="Подтвердить",
                     callback_data="purchase_confirm_yes",
                 ),
                 InlineKeyboardButton(
-                    text="❌ Отменить",
+                    text="Отменить",
                     callback_data="purchase_confirm_no",
                 ),
             ],
@@ -431,11 +470,18 @@ async def fsm_confirm_yes(callback: CallbackQuery, state: FSMContext) -> None:
 
     await state.clear()
 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Экспорт",
+            callback_data=f"wf_export_{request_id}",
+        )],
+    ])
+
     await callback.message.answer(
-        f"✅ <b>Данные закупки сохранены!</b>\n\n"
-        f"Заявка #{request_id} готова к подаче иска.\n"
-        f"Экспорт: /export {request_id}",
+        f"<b>Данные закупки сохранены!</b>\n\n"
+        f"Заявка #{request_id} готова к подаче иска.",
         parse_mode="HTML",
+        reply_markup=keyboard,
     )
 
     logger.info(
@@ -455,12 +501,24 @@ async def fsm_confirm_yes(callback: CallbackQuery, state: FSMContext) -> None:
 async def fsm_confirm_no(callback: CallbackQuery, state: FSMContext) -> None:
     """Отмена подтверждения"""
     await callback.answer()
+
+    data = await state.get_data()
+    request_id = data.get("request_id")
     await state.clear()
 
-    await callback.message.answer(
-        "❌ Ввод данных закупки отменён.\n"
-        "Для повторного ввода используйте /purchase_done"
-    )
+    if request_id:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="Повторить ввод",
+                callback_data=f"wf_purchdone_{request_id}",
+            )],
+        ])
+        await callback.message.answer(
+            "Ввод данных закупки отменён.",
+            reply_markup=keyboard,
+        )
+    else:
+        await callback.message.answer("Ввод данных закупки отменён.")
 
 
 # =====================================================================
@@ -484,29 +542,48 @@ _STATUS_EMOJI = {
 ITEMS_PER_PAGE = 10
 
 
-def _workflow_buttons(workflow_id: int, status: str) -> InlineKeyboardMarkup:
+def _workflow_buttons(
+    workflow_id: int,
+    status: str,
+    request_id: int | None = None,
+) -> InlineKeyboardMarkup | None:
     """Inline-кнопки для карточки воронки, зависят от статуса."""
     rows: list[list[InlineKeyboardButton]] = []
 
     if status == "NEW_SELLER_ATTACH":
         rows.append([InlineKeyboardButton(
-            text="⚠️ Отправить WARN1",
+            text="Отправить WARN1",
             callback_data=f"wf_warn1_{workflow_id}",
         )])
     elif status in ("WARN1_SENT", "DIALOG_ACTIVE"):
         rows.append([InlineKeyboardButton(
-            text="📤 Отправить WARN2",
+            text="Отправить WARN2",
             callback_data=f"wf_warn2_{workflow_id}",
         )])
     elif status == "WARN2_SENT":
         rows.append([InlineKeyboardButton(
-            text="⚖️ Юрзаявка",
+            text="Юрзаявка",
             callback_data=f"wf_escalate_{workflow_id}",
+        )])
+    elif status == "LEGAL_REQUEST_CREATED" and request_id:
+        rows.append([InlineKeyboardButton(
+            text="Назначить закупку",
+            callback_data=f"wf_assign_{request_id}",
+        )])
+    elif status == "CONTROL_PURCHASE_REQUIRED" and request_id:
+        rows.append([InlineKeyboardButton(
+            text="Ввести данные закупки",
+            callback_data=f"wf_purchdone_{request_id}",
+        )])
+    elif status == "READY_FOR_LAWSUIT" and request_id:
+        rows.append([InlineKeyboardButton(
+            text="Экспорт",
+            callback_data=f"wf_export_{request_id}",
         )])
 
     if status not in ("CLOSED", "READY_FOR_LAWSUIT"):
         rows.append([InlineKeyboardButton(
-            text="✅ Закрыть воронку",
+            text="Закрыть воронку",
             callback_data=f"wf_closeask_{workflow_id}",
         )])
 
@@ -515,8 +592,11 @@ def _workflow_buttons(workflow_id: int, status: str) -> InlineKeyboardMarkup:
 
 def _get_workflow_engine():
     """Получить ссылку на глобальный workflow_engine из main."""
-    import main  # noqa: E402 — ленивый импорт для избежания циклов
-    return main.workflow_engine
+    import sys
+    main_module = sys.modules.get("__main__")
+    if main_module is None:
+        return None
+    return getattr(main_module, "workflow_engine", None)
 
 
 def _get_evidence_exporter():
@@ -577,12 +657,12 @@ async def cmd_workflows(message: Message) -> None:
     nav_buttons: list[InlineKeyboardButton] = []
     if page > 1:
         nav_buttons.append(InlineKeyboardButton(
-            text="⬅️ Назад",
+            text="Назад",
             callback_data=f"wf_page_{page - 1}",
         ))
     if page < total_pages:
         nav_buttons.append(InlineKeyboardButton(
-            text="Вперёд ➡️",
+            text="Вперёд",
             callback_data=f"wf_page_{page + 1}",
         ))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[nav_buttons]) if nav_buttons else None
@@ -636,8 +716,19 @@ async def _build_workflow_card(wf_id: int) -> tuple[Optional[str], Optional[Inli
     products_lines = []
     for p in products:
         attached = "✅" if p.get("still_attached") else "❌"
+        title = p.get('title', p['product_id'])
+        first_seen = p.get('first_seen')
+        days_str = ""
+        if first_seen:
+            from datetime import datetime as _dt
+            try:
+                seen_dt = _dt.fromisoformat(first_seen)
+                days = (now_kz().replace(tzinfo=None) - seen_dt).days
+                days_str = f" ({days} дн.)"
+            except (ValueError, TypeError):
+                pass
         products_lines.append(
-            f"  {attached} {p.get('title', p['product_id'])}"
+            f"  {attached} {title}{days_str}"
         )
 
     msg_db = _get_message_log_db()
@@ -673,7 +764,17 @@ async def _build_workflow_card(wf_id: int) -> tuple[Optional[str], Optional[Inli
             snippet = m["message_text"][:80]
             text += f"\n{arrow} {snippet}"
 
-    keyboard = _workflow_buttons(wf_id, wf["status"])
+    # Для legal-статусов нужен request_id
+    request_id = None
+    if wf["status"] in (
+        "LEGAL_REQUEST_CREATED", "CONTROL_PURCHASE_REQUIRED", "READY_FOR_LAWSUIT",
+    ):
+        legal_db = _get_legal_db()
+        legal_req = await legal_db.get_request_by_workflow(wf_id)
+        if legal_req:
+            request_id = legal_req["id"]
+
+    keyboard = _workflow_buttons(wf_id, wf["status"], request_id=request_id)
     return text, keyboard
 
 
@@ -723,11 +824,11 @@ async def cmd_warn(message: Message) -> None:
 
         if ok:
             await message.answer(
-                f"✅ {label} отправлен для воронки #{wf_id}"
+                f"{label} отправлен для воронки #{wf_id}"
             )
         else:
             await message.answer(
-                f"⚠️ Не удалось отправить {label} (см. логи)"
+                f"Не удалось отправить {label} (см. логи)"
             )
     else:
         await message.answer(
@@ -777,12 +878,12 @@ async def cmd_legal_requests(message: Message) -> None:
     nav_buttons: list[InlineKeyboardButton] = []
     if page > 1:
         nav_buttons.append(InlineKeyboardButton(
-            text="⬅️ Назад",
+            text="Назад",
             callback_data=f"lr_page_{page - 1}",
         ))
     if page < total_pages:
         nav_buttons.append(InlineKeyboardButton(
-            text="Вперёд ➡️",
+            text="Вперёд",
             callback_data=f"lr_page_{page + 1}",
         ))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[nav_buttons]) if nav_buttons else None
@@ -838,13 +939,26 @@ async def cmd_legal_detail(message: Message) -> None:
         text += f"<b>Завершена:</b> {req['completed_at']}\n"
 
     buttons: list[list[InlineKeyboardButton]] = []
+
+    purchase_status = req.get("control_purchase_status", "PENDING")
+    if purchase_status == "PENDING":
+        buttons.append([InlineKeyboardButton(
+            text="Назначить закупку",
+            callback_data=f"wf_assign_{req_id}",
+        )])
+    elif purchase_status == "ASSIGNED":
+        buttons.append([InlineKeyboardButton(
+            text="Ввести данные закупки",
+            callback_data=f"wf_purchdone_{req_id}",
+        )])
+
     buttons.append([
         InlineKeyboardButton(
-            text="📋 Воронка",
+            text="Воронка",
             callback_data=f"wf_view_{req['workflow_id']}",
         ),
         InlineKeyboardButton(
-            text="📦 Экспорт",
+            text="Экспорт",
             callback_data=f"wf_export_{req_id}",
         ),
     ])
@@ -882,7 +996,7 @@ async def cmd_export(message: Message) -> None:
         await message.answer(f"Юрзаявка #{req_id} не найдена")
         return
 
-    await message.answer("📦 Формирую архив, подождите...")
+    await message.answer("Формирую архив, подождите...")
 
     try:
         exporter = _get_evidence_exporter()
@@ -937,11 +1051,11 @@ async def cmd_close_workflow(message: Message) -> None:
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="✅ Да, закрыть",
+                text="Да, закрыть",
                 callback_data=f"wf_close_confirm_{wf_id}",
             ),
             InlineKeyboardButton(
-                text="❌ Отмена",
+                text="Отмена",
                 callback_data="wf_close_cancel",
             ),
         ],
@@ -1003,12 +1117,12 @@ async def cb_workflows_page(callback: CallbackQuery) -> None:
     nav_buttons: list[InlineKeyboardButton] = []
     if page > 1:
         nav_buttons.append(InlineKeyboardButton(
-            text="⬅️ Назад",
+            text="Назад",
             callback_data=f"wf_page_{page - 1}",
         ))
     if page < total_pages:
         nav_buttons.append(InlineKeyboardButton(
-            text="Вперёд ➡️",
+            text="Вперёд",
             callback_data=f"wf_page_{page + 1}",
         ))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[nav_buttons]) if nav_buttons else None
@@ -1050,12 +1164,12 @@ async def cb_legal_page(callback: CallbackQuery) -> None:
     nav_buttons: list[InlineKeyboardButton] = []
     if page > 1:
         nav_buttons.append(InlineKeyboardButton(
-            text="⬅️ Назад",
+            text="Назад",
             callback_data=f"lr_page_{page - 1}",
         ))
     if page < total_pages:
         nav_buttons.append(InlineKeyboardButton(
-            text="Вперёд ➡️",
+            text="Вперёд",
             callback_data=f"lr_page_{page + 1}",
         ))
     keyboard = InlineKeyboardMarkup(inline_keyboard=[nav_buttons]) if nav_buttons else None
@@ -1104,9 +1218,9 @@ async def cb_send_warn1(callback: CallbackQuery) -> None:
 
     ok = await engine.send_warn1(wf_id)
     if ok:
-        await callback.message.answer(f"✅ WARN1 отправлен (воронка #{wf_id})")
+        await callback.message.answer(f"WARN1 отправлен (воронка #{wf_id})")
     else:
-        await callback.message.answer(f"⚠️ Не удалось отправить WARN1 (#{wf_id})")
+        await callback.message.answer(f"Не удалось отправить WARN1 (#{wf_id})")
 
 
 # --- Ручной WARN2 (inline) ---
@@ -1128,9 +1242,9 @@ async def cb_send_warn2(callback: CallbackQuery) -> None:
 
     ok = await engine.send_warn2(wf_id)
     if ok:
-        await callback.message.answer(f"✅ WARN2 отправлен (воронка #{wf_id})")
+        await callback.message.answer(f"WARN2 отправлен (воронка #{wf_id})")
     else:
-        await callback.message.answer(f"⚠️ Не удалось отправить WARN2 (#{wf_id})")
+        await callback.message.answer(f"Не удалось отправить WARN2 (#{wf_id})")
 
 
 # --- Ручная эскалация (inline) ---
@@ -1152,14 +1266,198 @@ async def cb_escalate(callback: CallbackQuery) -> None:
 
     req_id = await engine.escalate_to_legal(wf_id)
     if req_id:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Юрзаявка",
+                    callback_data=f"wf_legalview_{req_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Назначить закупку",
+                    callback_data=f"wf_assign_{req_id}",
+                ),
+            ],
+        ])
         await callback.message.answer(
-            f"⚖️ Юрзаявка #{req_id} создана (воронка #{wf_id})\n"
-            f"/legal {req_id}"
+            f"Юрзаявка #{req_id} создана (воронка #{wf_id})",
+            reply_markup=keyboard,
         )
     else:
         await callback.message.answer(
-            f"⚠️ Не удалось создать юрзаявку (#{wf_id})"
+            f"Не удалось создать юрзаявку (#{wf_id})"
         )
+
+
+# --- Назначение закупки (inline) ---
+
+@admin_router.callback_query(F.data.startswith("wf_assign_"))
+async def cb_assign_purchase(callback: CallbackQuery) -> None:
+    """Назначить контрольную закупку через inline-кнопку."""
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    request_id = int(callback.data.split("_")[-1])
+    await callback.answer()
+
+    legal_db = _get_legal_db()
+    req = await legal_db.get_request(request_id)
+    if not req:
+        await callback.message.answer(f"Юрзаявка #{request_id} не найдена")
+        return
+
+    if req["control_purchase_status"] == "COMPLETED":
+        await callback.message.answer(
+            f"Закупка по заявке #{request_id} уже выполнена"
+        )
+        return
+
+    user = callback.from_user
+    assigned_to = f"@{user.username}" if user.username else user.full_name
+
+    await legal_db.assign_purchase(request_id, assigned_to)
+
+    workflow_db = _get_workflow_db()
+    workflow_id = req["workflow_id"]
+    await workflow_db.update_status(workflow_id, "CONTROL_PURCHASE_REQUIRED")
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Ввести данные закупки",
+            callback_data=f"wf_purchdone_{request_id}",
+        )],
+        [InlineKeyboardButton(
+            text="Воронка",
+            callback_data=f"wf_view_{workflow_id}",
+        )],
+    ])
+
+    await callback.message.answer(
+        f"<b>Закупка назначена</b>\n\n"
+        f"Заявка: #{request_id}\n"
+        f"Магазин: {req.get('shop_name', '—')}\n"
+        f"Ответственный: {assigned_to}",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+    logger.info(
+        f"Закупка для заявки {request_id} назначена: {assigned_to}, "
+        f"admin={callback.from_user.id}"
+    )
+
+
+# --- Ввод данных закупки (inline → FSM) ---
+
+@admin_router.callback_query(F.data.startswith("wf_purchdone_"))
+async def cb_purchase_done(callback: CallbackQuery, state: FSMContext) -> None:
+    """Начать ввод данных закупки через inline-кнопку (запускает FSM)."""
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    request_id = int(callback.data.split("_")[-1])
+    await callback.answer()
+
+    legal_db = _get_legal_db()
+    req = await legal_db.get_request(request_id)
+    if not req:
+        await callback.message.answer(f"Юрзаявка #{request_id} не найдена")
+        return
+
+    if req.get("ready_for_lawsuit"):
+        await callback.message.answer(
+            f"Заявка #{request_id} уже готова к подаче иска"
+        )
+        return
+
+    await state.update_data(
+        request_id=request_id,
+        shop_name=req.get("shop_name", "Неизвестный"),
+        doc_paths=[],
+    )
+    await state.set_state(PurchaseDataFSM.waiting_bin)
+
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="Отменить ввод",
+            callback_data="purchase_cancel",
+        )],
+    ])
+
+    await callback.message.answer(
+        f"<b>Ввод данных закупки — заявка #{request_id}</b>\n"
+        f"Магазин: {req.get('shop_name', '—')}\n\n"
+        f"<b>Шаг 1/4:</b> Введите БИН/ИИН продавца",
+        parse_mode="HTML",
+        reply_markup=cancel_kb,
+    )
+
+
+# --- Просмотр юрзаявки (inline) ---
+
+@admin_router.callback_query(F.data.startswith("wf_legalview_"))
+async def cb_legal_view(callback: CallbackQuery) -> None:
+    """Показать детали юрзаявки через inline-кнопку."""
+    if not _is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    req_id = int(callback.data.split("_")[-1])
+    await callback.answer()
+
+    legal_db = _get_legal_db()
+    req = await legal_db.get_request(req_id)
+    if not req:
+        await callback.message.answer(f"Юрзаявка #{req_id} не найдена")
+        return
+
+    ready_icon = "✅" if req.get("ready_for_lawsuit") else "⏳"
+    text = (
+        f"⚖️ <b>Юрзаявка #{req_id}</b> {ready_icon}\n\n"
+        f"<b>Магазин:</b> {req.get('shop_name', '?')}\n"
+        f"<b>Телефон:</b> {req.get('phone', '—')}\n"
+        f"<b>Workflow:</b> #{req.get('workflow_id')}\n"
+        f"<b>Создана:</b> {req.get('created_at', '—')}\n"
+        f"<b>Закупка:</b> {req.get('control_purchase_status', 'PENDING')}\n"
+    )
+
+    if req.get("assigned_to"):
+        text += f"<b>Назначена:</b> {req['assigned_to']}\n"
+    if req.get("bin_iin"):
+        text += f"<b>БИН/ИИН:</b> <code>{req['bin_iin']}</code>\n"
+    if req.get("purchase_order_number"):
+        text += f"<b>Заказ:</b> <code>{req['purchase_order_number']}</code>\n"
+    if req.get("completed_at"):
+        text += f"<b>Завершена:</b> {req['completed_at']}\n"
+
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    purchase_status = req.get("control_purchase_status", "PENDING")
+    if purchase_status == "PENDING":
+        buttons.append([InlineKeyboardButton(
+            text="Назначить закупку",
+            callback_data=f"wf_assign_{req_id}",
+        )])
+    elif purchase_status == "ASSIGNED":
+        buttons.append([InlineKeyboardButton(
+            text="Ввести данные закупки",
+            callback_data=f"wf_purchdone_{req_id}",
+        )])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="Воронка",
+            callback_data=f"wf_view_{req['workflow_id']}",
+        ),
+        InlineKeyboardButton(
+            text="Экспорт",
+            callback_data=f"wf_export_{req_id}",
+        ),
+    ])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 # --- Закрытие воронки (inline button → подтверждение) ---
@@ -1180,7 +1478,7 @@ async def cb_close_confirm(callback: CallbackQuery) -> None:
         return
 
     await engine.close_workflow(wf_id, reason="manual_close")
-    await callback.message.edit_text(f"✅ Воронка #{wf_id} закрыта")
+    await callback.message.edit_text(f"Воронка #{wf_id} закрыта")
 
 
 @admin_router.callback_query(F.data == "wf_close_cancel")
@@ -1205,11 +1503,11 @@ async def cb_close_workflow(callback: CallbackQuery) -> None:
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="✅ Да, закрыть",
+                text="Да, закрыть",
                 callback_data=f"wf_close_confirm_{wf_id}",
             ),
             InlineKeyboardButton(
-                text="❌ Отмена",
+                text="Отмена",
                 callback_data="wf_close_cancel",
             ),
         ],

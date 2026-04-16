@@ -6,6 +6,8 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import logging
 
+from config import now_kz_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,10 +24,10 @@ class ProductsDB:
                 await db.execute("PRAGMA foreign_keys = ON")
                 await db.execute(
                     """
-                    INSERT INTO products (master_sku, url, title)
-                    VALUES (?, ?, ?)
+                    INSERT INTO products (master_sku, url, title, added_at)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (master_sku, url, title)
+                    (master_sku, url, title, now_kz_str())
                 )
                 await db.commit()
                 logger.info(f"Добавлен товар: {master_sku}")
@@ -123,10 +125,10 @@ class ProductsDB:
                 await db.execute(
                     """
                     UPDATE products 
-                    SET last_checked = CURRENT_TIMESTAMP 
+                    SET last_checked = ? 
                     WHERE master_sku = ?
                     """,
-                    (master_sku,)
+                    (now_kz_str(), master_sku)
                 )
                 await db.commit()
         except Exception as e:

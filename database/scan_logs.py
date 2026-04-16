@@ -5,6 +5,8 @@ import aiosqlite
 from typing import Optional, Dict, Any, List
 import logging
 
+from config import now_kz_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +26,8 @@ class ScanLogsDB:
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute(
-                    "INSERT INTO scan_logs (started_at) VALUES (CURRENT_TIMESTAMP)"
+                    "INSERT INTO scan_logs (started_at) VALUES (?)",
+                    (now_kz_str(),),
                 )
                 await db.commit()
                 scan_id = cursor.lastrowid
@@ -47,13 +50,13 @@ class ScanLogsDB:
                 await db.execute(
                     """
                     UPDATE scan_logs 
-                    SET finished_at = CURRENT_TIMESTAMP,
+                    SET finished_at = ?,
                         products_checked = ?,
                         new_sellers = ?,
                         errors = ?
                     WHERE id = ?
                     """,
-                    (products_checked, new_sellers, errors, scan_id)
+                    (now_kz_str(), products_checked, new_sellers, errors, scan_id)
                 )
                 await db.commit()
                 logger.info(

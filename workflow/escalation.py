@@ -17,6 +17,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from config import Config
+from database import MessageLogDB
 
 if TYPE_CHECKING:
     from workflow.engine import WorkflowEngine
@@ -41,6 +42,7 @@ class EscalationScheduler:
     def __init__(self, workflow_engine: "WorkflowEngine") -> None:
         self._engine = workflow_engine
         self._workflow_db = workflow_engine._workflow_db
+        self._message_log_db = workflow_engine._message_log_db
 
     async def process_new_sellers(self) -> None:
         """
@@ -65,6 +67,15 @@ class EscalationScheduler:
             skipped = 0
 
             for wf in workflows:
+                # Проверяем глобальный дневной лимит перед каждой отправкой
+                if await self._is_daily_limit_reached():
+                    remaining = len(workflows) - processed - skipped
+                    logger.info(
+                        f"Дневной лимит ({Config.DAILY_MESSAGE_LIMIT}) достигнут, "
+                        f"отложено {remaining} WARN1 на завтра"
+                    )
+                    break
+
                 workflow_id = wf["id"]
                 merchant_name = wf.get("merchant_name", "?")
 
@@ -120,6 +131,12 @@ class EscalationScheduler:
             logger.info(f"Найдено {len(workflows)} просроченных WARN1")
 
             for wf in workflows:
+                if await self._is_daily_limit_reached():
+                    logger.info(
+                        f"Дневной лимит ({Config.DAILY_MESSAGE_LIMIT}) достигнут, "
+                        f"отложена эскалация WARN1→WARN2"
+                    )
+                    break
                 await self._escalate_warn1(wf)
 
         except Exception as e:
@@ -194,8 +211,13 @@ class EscalationScheduler:
             )
 
     # ------------------------------------------------------------------
-    # Приватные методы обработки отдельных workflow
+    # Приватные методы
     # ------------------------------------------------------------------
+
+    async def _is_daily_limit_reached(self) -> bool:
+        """Проверить, достигнут ли глобальный дневной лимит исходящих сообщений."""
+        sent_today = await self._message_log_db.count_all_outgoing_today()
+        return sent_today >= Config.DAILY_MESSAGE_LIMIT
 
     async def _escalate_warn1(self, wf: dict) -> None:
         """Эскалация одного WARN1_SENT → WARN2 (или close при отсоединении)."""

@@ -65,7 +65,7 @@ def format_grouped_notifications(sellers: List[NewSellerInfo]) -> str:
     if count > 20:
         message += f"<i>...и ещё {count - 20}</i>\n\n"
     
-    message += "<i>📊 Используйте /list чтобы увидеть всех</i>"
+    message += "<i>Используйте /list чтобы увидеть всех</i>"
     
     return message
 

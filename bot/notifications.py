@@ -108,7 +108,7 @@ class NotificationService:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📋 Воронка",
+                    text="Воронка",
                     callback_data=f"wf_view_{workflow_id}",
                 ),
             ],
@@ -127,11 +127,11 @@ class NotificationService:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📋 Воронка",
+                    text="Воронка",
                     callback_data=f"wf_view_{workflow_id}",
                 ),
                 InlineKeyboardButton(
-                    text="⚖️ Юрзаявка",
+                    text="Юрзаявка",
                     callback_data=f"wf_escalate_{workflow_id}",
                 ),
             ],
@@ -156,7 +156,7 @@ class NotificationService:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📋 Воронка",
+                    text="Воронка",
                     callback_data=f"wf_view_{workflow_id}",
                 ),
             ],
@@ -179,17 +179,22 @@ class NotificationService:
             f"Товаров: {products_count}\n"
             f"WARN1: {workflow.get('warn1_sent_at', '—')}\n"
             f"WARN2: {workflow.get('warn2_sent_at', '—')}\n\n"
-            f"Статус: Требуется контрольная закупка\n"
-            f"👉 Назначить: /assign_purchase {request_id}"
+            f"Статус: Требуется контрольная закупка"
         )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📋 Воронка",
+                    text="Назначить закупку",
+                    callback_data=f"wf_assign_{request_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Воронка",
                     callback_data=f"wf_view_{workflow_id}",
                 ),
                 InlineKeyboardButton(
-                    text="📦 Экспорт",
+                    text="Экспорт",
                     callback_data=f"wf_export_{request_id}",
                 ),
             ],
@@ -203,10 +208,15 @@ class NotificationService:
         text = (
             f"🛒 <b>Требуется контрольная закупка</b>\n\n"
             f"Заявка: #{request_id}\n"
-            f"Магазин: {seller.get('merchant_name', '?')}\n\n"
-            f"👉 Назначить: /assign_purchase {request_id}"
+            f"Магазин: {seller.get('merchant_name', '?')}"
         )
-        await self.send_to_admins(text)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="Назначить закупку",
+                callback_data=f"wf_assign_{request_id}",
+            )],
+        ])
+        await self.send_to_admins(text, reply_markup=keyboard)
 
     async def notify_detached(
         self, workflow_id: int, seller: Dict[str, Any], reason: str = "detached"

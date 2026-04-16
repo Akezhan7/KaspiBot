@@ -2,8 +2,11 @@
 CRUD операции для истории новых продавцов
 """
 import aiosqlite
+from datetime import timedelta
 from typing import List, Dict, Any
 import logging
+
+from config import now_kz
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +29,10 @@ class RecentSellersDB:
                 await db.execute("PRAGMA foreign_keys = ON")
                 await db.execute(
                     """
-                    INSERT INTO recent_sellers (product_id, seller_id, price)
-                    VALUES (?, ?, ?)
+                    INSERT INTO recent_sellers (product_id, seller_id, price, detected_at)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (product_id, seller_id, price)
+                    (product_id, seller_id, price, now_kz().strftime("%Y-%m-%d %H:%M:%S"))
                 )
                 await db.commit()
                 logger.debug(f"Добавлена история: товар={product_id}, продавец={seller_id}")
@@ -103,9 +106,9 @@ class RecentSellersDB:
                 cursor = await db.execute(
                     """
                     DELETE FROM recent_sellers 
-                    WHERE detected_at < datetime('now', ?)
+                    WHERE detected_at < ?
                     """,
-                    (f'-{days} days',)
+                    ((now_kz() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S"),)
                 )
                 await db.commit()
                 count = cursor.rowcount

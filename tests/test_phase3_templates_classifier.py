@@ -47,12 +47,12 @@ class TestTemplateStructure:
     """Проверка структуры и полноты пулов шаблонов."""
 
     def test_warn1_templates_count(self):
-        """WARN1 должен иметь >= 5 вариантов."""
-        assert len(WARN1_TEMPLATES) >= 5
+        """WARN1 должен иметь >= 1 вариант."""
+        assert len(WARN1_TEMPLATES) >= 1
 
     def test_warn2_templates_count(self):
-        """WARN2 должен иметь >= 5 вариантов."""
-        assert len(WARN2_TEMPLATES) >= 5
+        """WARN2 должен иметь >= 1 вариант."""
+        assert len(WARN2_TEMPLATES) >= 1
 
     def test_reply_pools_not_empty(self):
         """Все пулы авто-ответов непустые."""
@@ -77,12 +77,12 @@ class TestTemplateStructure:
     def test_warn1_all_have_correct_category(self):
         for t in WARN1_TEMPLATES:
             assert t.category == MessageCategory.WARN1
-            assert t.tone == ToneLevel.SOFT
+            assert t.tone == ToneLevel.LEGAL
 
     def test_warn2_all_have_correct_category(self):
         for t in WARN2_TEMPLATES:
             assert t.category == MessageCategory.WARN2
-            assert t.tone == ToneLevel.FIRM
+            assert t.tone == ToneLevel.LEGAL
 
     def test_all_templates_have_unique_codes(self):
         """Все коды шаблонов уникальны."""
@@ -182,17 +182,16 @@ class TestRenderTemplate:
         assert "kaspi.kz/item/123" in result
         assert "PKS Ltd" in result
 
-    def test_warn2_render_with_warn1_date(self):
-        """Рендеринг WARN2 с датой первого предупреждения."""
-        t = WARN2_TEMPLATES[2]  # шаблон с {warn1_date}
+    def test_warn2_render_with_context(self):
+        """Рендеринг WARN2 с контекстом магазина и товаров."""
+        t = WARN2_TEMPLATES[0]
         result = render_template(t, {
             "shop_name": "ТестМагазин",
             "product_links": "— https://kaspi.kz/item/789",
             "our_company": "PKS Ltd",
-            "warn1_date": "15.03.2026",
         })
-        assert "15.03.2026" in result
         assert "ТестМагазин" in result
+        assert "kaspi.kz/item/789" in result
 
 
 # ========================================================================

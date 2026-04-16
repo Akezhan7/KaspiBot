@@ -27,7 +27,7 @@ from database.migrations import DatabaseMigrations
 from parser import ProductScanner
 from bot import router, admin_router, NotificationService
 from workflow import WorkflowEngine, EscalationScheduler
-from whatsapp import GreenAPIClient, MessageClassifier
+from whatsapp import GreenAPIClient, MessageClassifier, WhatsAppWebhook
 
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
@@ -189,6 +189,7 @@ async def main():
             api_url=Config.GREEN_API_URL,
             instance_id=Config.GREEN_API_INSTANCE_ID,
             token=Config.GREEN_API_TOKEN,
+            media_url=Config.GREEN_API_MEDIA_URL,
         )
         
         # Инициализация LLM-классификатора
@@ -210,6 +211,17 @@ async def main():
         
         # Передать workflow_engine в scanner для интеграции
         scanner.workflow_engine = workflow_engine
+        
+        # Инициализация WhatsApp webhook-сервера
+        ip_whitelist_raw = Config.WHATSAPP_WEBHOOK_IP_WHITELIST
+        ip_whitelist = {ip.strip() for ip in ip_whitelist_raw.split(",") if ip.strip()} if ip_whitelist_raw else set()
+        
+        whatsapp_webhook = WhatsAppWebhook(
+            host=Config.WHATSAPP_WEBHOOK_HOST,
+            port=Config.WHATSAPP_WEBHOOK_PORT,
+            on_incoming_message=lambda phone, text, name, raw: workflow_engine.handle_incoming_message(phone, text, name),
+            ip_whitelist=ip_whitelist,
+        )
         
         # Инициализация планировщика эскалации
         escalation_scheduler = EscalationScheduler(workflow_engine)
@@ -311,10 +323,14 @@ async def main():
         # Startup
         await on_startup()
         
-        # Запуск polling
+        # Запуск WhatsApp webhook-сервера
+        await whatsapp_webhook.start()
+        
+        # Запуск polling (drop_pending_updates — не обрабатывать старые update-ы)
         try:
-            await dp.start_polling(bot)
+            await dp.start_polling(bot, drop_pending_updates=True)
         finally:
+            await whatsapp_webhook.stop()
             await on_shutdown()
             scheduler.shutdown()
             await bot.session.close()

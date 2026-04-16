@@ -255,9 +255,9 @@ async def test_export_dialog_log(db_path):
     # Исходящие (WARN) — маркер →
     assert "→" in result
 
-    # Входящие — маркер ←
+    # Входящие — маркер ← с именем магазина
     assert "←" in result
-    assert "DIDNT_KNOW" in result or "PROVE_IT" in result
+    assert "← Test Shop:" in result
 
     # Счётчик
     assert "Всего сообщений:" in result

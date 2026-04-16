@@ -5,6 +5,8 @@ import aiosqlite
 from typing import List, Optional, Dict, Any
 import logging
 
+from config import now_kz_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,10 +31,10 @@ class SellersDB:
                 await db.execute("PRAGMA foreign_keys = ON")
                 await db.execute(
                     """
-                    INSERT INTO sellers (merchant_id, merchant_name, phone)
-                    VALUES (?, ?, ?)
+                    INSERT INTO sellers (merchant_id, merchant_name, phone, created_at)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (merchant_id, merchant_name, phone)
+                    (merchant_id, merchant_name, phone, now_kz_str())
                 )
                 await db.commit()
                 logger.info(f"Добавлен продавец: {merchant_id} - {merchant_name}")
@@ -160,7 +162,8 @@ class SellersDB:
                         p.title,
                         p.url,
                         ps.price,
-                        ps.last_seen
+                        ps.last_seen,
+                        ps.first_seen
                     FROM product_sellers ps
                     JOIN products p ON ps.product_id = p.master_sku
                     WHERE ps.seller_id = ? AND ps.is_active = 1

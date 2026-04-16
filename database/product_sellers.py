@@ -5,6 +5,8 @@ import aiosqlite
 from typing import List, Optional, Dict, Any, Tuple
 import logging
 
+from config import now_kz_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,13 +47,14 @@ class ProductSellersDB:
                 
                 if row is None:
                     # Новая связь - INSERT
+                    now = now_kz_str()
                     await db.execute(
                         """
                         INSERT INTO product_sellers 
-                        (product_id, seller_id, price, is_active)
-                        VALUES (?, ?, ?, 1)
+                        (product_id, seller_id, price, is_active, first_seen, last_seen)
+                        VALUES (?, ?, ?, 1, ?, ?)
                         """,
-                        (product_id, seller_id, price)
+                        (product_id, seller_id, price, now, now)
                     )
                     await db.commit()
                     logger.info(f"Новая связь: товар={product_id}, продавец={seller_id}")
@@ -65,11 +68,11 @@ class ProductSellersDB:
                         """
                         UPDATE product_sellers 
                         SET price = ?, 
-                            last_seen = CURRENT_TIMESTAMP,
+                            last_seen = ?,
                             is_active = 1
                         WHERE product_id = ? AND seller_id = ?
                         """,
-                        (price, product_id, seller_id)
+                        (price, now_kz_str(), product_id, seller_id)
                     )
                     await db.commit()
                     
@@ -237,6 +240,24 @@ class ProductSellersDB:
             logger.error(f"Ошибка подсчета связей: {e}")
             raise
     
+    async def get_active_product_ids_for_seller(
+        self, seller_id: str
+    ) -> List[str]:
+        """Получить список product_id всех активных товаров продавца."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                query = """
+                    SELECT product_id
+                    FROM product_sellers
+                    WHERE seller_id = ? AND is_active = 1
+                """
+                async with db.execute(query, (seller_id,)) as cursor:
+                    rows = await cursor.fetchall()
+                    return [row[0] for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка получения товаров продавца {seller_id}: {e}")
+            raise
+
     async def get_other_products_for_seller(
         self, 
         seller_id: str, 
