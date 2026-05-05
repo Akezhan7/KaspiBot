@@ -66,9 +66,9 @@ notification_service: NotificationService = None
 scanner: ProductScanner = None
 workflow_engine: WorkflowEngine = None
 escalation_scheduler: EscalationScheduler = None
-browser_manager: BrowserManager = None
-kaspi_auth: KaspiAuthManager = None
-marketing_scraper: MarketingScraper = None
+browser_manager = None
+kaspi_auth = None
+marketing_scraper = None
 
 
 # === ЗАДАЧИ ПЛАНИРОВЩИКА ===
