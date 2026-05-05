@@ -123,6 +123,7 @@ class Config:
     SCRAPE_ACTION_DELAY_MIN: float = float(os.getenv("SCRAPE_ACTION_DELAY_MIN", "1.0"))
     SCRAPE_ACTION_DELAY_MAX: float = float(os.getenv("SCRAPE_ACTION_DELAY_MAX", "3.0"))
     SMS_CODE_TIMEOUT_SECONDS: int = int(os.getenv("SMS_CODE_TIMEOUT_SECONDS", "300"))
+    KASPI_PAY_NAV_TIMEOUT_SECONDS: int = int(os.getenv("KASPI_PAY_NAV_TIMEOUT_SECONDS", "120"))
 
     # === TMA API (REST API для Telegram Mini App) ===
     TMA_API_HOST: str = os.getenv("TMA_API_HOST", "0.0.0.0")
