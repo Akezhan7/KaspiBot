@@ -28,6 +28,7 @@ from parser import ProductScanner
 from bot import router, admin_router, scraper_router, set_auth_manager, set_marketing_scraper, NotificationService
 from workflow import WorkflowEngine, EscalationScheduler
 from whatsapp import GreenAPIClient, MessageClassifier, WhatsAppWebhook
+from scraper import BrowserManager, KaspiAuthManager, MarketingScraper
 from database.ads_data import AdsDataDB, ScrapeLogsDB
 from analytics import AdsAnalyticsProcessor, DataAggregator
 from api import TMAApiServer
@@ -66,9 +67,9 @@ notification_service: NotificationService = None
 scanner: ProductScanner = None
 workflow_engine: WorkflowEngine = None
 escalation_scheduler: EscalationScheduler = None
-browser_manager = None
-kaspi_auth = None
-marketing_scraper = None
+browser_manager: BrowserManager = None
+kaspi_auth: KaspiAuthManager = None
+marketing_scraper: MarketingScraper = None
 
 
 # === ЗАДАЧИ ПЛАНИРОВЩИКА ===
@@ -231,7 +232,7 @@ async def on_shutdown():
 async def main():
     """Главная функция"""
     global bot, notification_service, scanner, workflow_engine, escalation_scheduler
-    global browser_manager, kaspi_auth, marketing_scraper
+    global browser_manager, kaspi_auth
     tma_api_server: TMAApiServer = None
     
     # Настройка логирования
@@ -302,7 +303,6 @@ async def main():
         
         # Инициализация Kaspi Pay scraper (если настроен)
         if Config.KASPI_PAY_PHONE:
-            from scraper import BrowserManager, KaspiAuthManager, MarketingScraper
             browser_manager = BrowserManager(
                 storage_state_path=Config.KASPI_STORAGE_STATE_PATH,
                 proxy_url=Config.PROXY_URL or None,
