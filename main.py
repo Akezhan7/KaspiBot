@@ -25,9 +25,13 @@ from database import (
 )
 from database.migrations import DatabaseMigrations
 from parser import ProductScanner
-from bot import router, admin_router, NotificationService
+from bot import router, admin_router, scraper_router, set_auth_manager, set_marketing_scraper, NotificationService
 from workflow import WorkflowEngine, EscalationScheduler
 from whatsapp import GreenAPIClient, MessageClassifier, WhatsAppWebhook
+from scraper import BrowserManager, KaspiAuthManager, MarketingScraper
+from database.ads_data import AdsDataDB, ScrapeLogsDB
+from analytics import AdsAnalyticsProcessor, DataAggregator
+from api import TMAApiServer
 
 
 # === НАСТРОЙКА ЛОГИРОВАНИЯ ===
@@ -63,6 +67,9 @@ notification_service: NotificationService = None
 scanner: ProductScanner = None
 workflow_engine: WorkflowEngine = None
 escalation_scheduler: EscalationScheduler = None
+browser_manager: BrowserManager = None
+kaspi_auth: KaspiAuthManager = None
+marketing_scraper: MarketingScraper = None
 
 
 # === ЗАДАЧИ ПЛАНИРОВЩИКА ===
@@ -91,6 +98,72 @@ async def scheduled_scan():
     except Exception as e:
         logger.error(f"Ошибка запланированного сканирования: {e}", exc_info=True)
         await notification_service.notify_scan_error(str(e))
+
+
+async def scheduled_scrape_marketing():
+    """Ежедневный автоматический сбор маркетинговых данных из Kaspi Pay."""
+    logger = logging.getLogger(__name__)
+    logger.info("Начало запланированного скрапинга Kaspi Marketing")
+
+    if not marketing_scraper or not kaspi_auth:
+        logger.info("Kaspi Marketing scraper не инициализирован — пропуск задачи")
+        return
+
+    db_path = str(Config.DB_PATH)
+    scrape_logs_db = ScrapeLogsDB(db_path)
+    ads_data_db = AdsDataDB(db_path)
+    log_id = await scrape_logs_db.create_log()
+
+    try:
+        # Проверяем сессию; если истекла — уведомляем и выходим
+        if not await kaspi_auth.is_session_valid():
+            msg = (
+                "Kaspi Pay: сессия истекла — сбор данных пропущен.\n"
+                "Выполните /login_kaspi для повторной авторизации."
+            )
+            logger.warning(msg)
+            await notification_service.send_to_admins(msg)
+            await scrape_logs_db.update_log(log_id, status="failed", errors="Сессия истекла")
+            return
+
+        result = await marketing_scraper.scrape_all()
+        scraped_at = result.scraped_at.strftime("%Y-%m-%d %H:%M:%S")
+
+        campaign_dicts = [c.to_dao_dict(scraped_at) for c in result.campaigns]
+        saved_campaigns = await ads_data_db.save_campaigns_batch(campaign_dicts)
+
+        bonus_dicts = [b.to_dao_dict(scraped_at) for b in result.bonuses]
+        saved_bonuses = await ads_data_db.save_campaigns_batch(bonus_dicts)
+
+        total_saved = saved_campaigns + saved_bonuses
+        errors_text = "\n".join(result.errors) if result.errors else None
+        status = "completed" if not result.errors else "completed_with_errors"
+
+        await scrape_logs_db.update_log(
+            log_id,
+            status=status,
+            products_scraped=total_saved,
+            errors=errors_text,
+        )
+
+        summary = (
+            f"Kaspi Marketing: сбор завершён\n"
+            f"Кампаний: {len(result.campaigns)}, бонусов: {len(result.bonuses)}\n"
+            f"Сохранено: {total_saved} записей"
+        )
+        if result.errors:
+            summary += f"\n⚠️ Ошибок: {len(result.errors)}"
+        logger.info(summary)
+
+        if result.errors:
+            await notification_service.send_to_admins(summary)
+
+    except Exception as e:
+        logger.error("Критическая ошибка при плановом скрапинге: %s", e, exc_info=True)
+        await scrape_logs_db.update_log(log_id, status="failed", errors=str(e))
+        await notification_service.send_to_admins(
+            f"Kaspi Marketing: ошибка планового скрапинга — {e}"
+        )
 
 
 async def manual_scan_handler(message):
@@ -159,6 +232,8 @@ async def on_shutdown():
 async def main():
     """Главная функция"""
     global bot, notification_service, scanner, workflow_engine, escalation_scheduler
+    global browser_manager, kaspi_auth
+    tma_api_server: TMAApiServer = None
     
     # Настройка логирования
     setup_logging()
@@ -226,8 +301,64 @@ async def main():
         # Инициализация планировщика эскалации
         escalation_scheduler = EscalationScheduler(workflow_engine)
         
+        # Инициализация Kaspi Pay scraper (если настроен)
+        if Config.KASPI_PAY_PHONE:
+            browser_manager = BrowserManager(
+                storage_state_path=Config.KASPI_STORAGE_STATE_PATH,
+                proxy_url=Config.PROXY_URL or None,
+                headless=Config.PLAYWRIGHT_HEADLESS,
+            )
+            await browser_manager.launch()
+
+            kaspi_auth = KaspiAuthManager(browser_manager)
+            kaspi_auth.set_notify_callback(notification_service.send_to_admins)
+            set_auth_manager(kaspi_auth)
+
+            # Инициализация MarketingScraper
+            marketing_scraper = MarketingScraper(
+                browser_context=browser_manager.context,
+                db_path=db_path,
+            )
+            scrape_logs_db = ScrapeLogsDB(db_path)
+            ads_data_db_inst = AdsDataDB(db_path)
+            set_marketing_scraper(marketing_scraper, scrape_logs_db, ads_data_db_inst)
+
+            logger.info("Kaspi Pay scraper инициализирован")
+        else:
+            logger.info("KASPI_PAY_PHONE не задан — Kaspi Pay scraper отключен")
+
+        # Инициализация аналитики
+        ads_data_db_analytics = AdsDataDB(db_path)
+        scrape_logs_db_analytics = ScrapeLogsDB(db_path)
+        analytics_processor = AdsAnalyticsProcessor(
+            ads_db=ads_data_db_analytics,
+            products_db=products_db,
+            product_sellers_db=product_sellers_db,
+        )
+        data_aggregator = DataAggregator(
+            ads_db=ads_data_db_analytics,
+            products_db=products_db,
+        )
+
+        # Инициализация TMA API-сервера
+        tma_api_server = TMAApiServer(
+            processor=analytics_processor,
+            aggregator=data_aggregator,
+            ads_db=ads_data_db_analytics,
+            products_db=products_db,
+            scrape_logs_db=scrape_logs_db_analytics,
+            bot_token=Config.TELEGRAM_BOT_TOKEN,
+            admin_user_ids=set(Config.ADMIN_USER_IDS),
+            host=Config.TMA_API_HOST,
+            port=Config.TMA_API_PORT,
+            cors_origins=Config.TMA_CORS_ORIGINS,
+            scrape_trigger=scheduled_scrape_marketing if Config.KASPI_PAY_PHONE else None,
+            tma_dist_path=Config.TMA_DIST_PATH,
+        )
+
         # Dispatcher
         dp = Dispatcher()
+        dp.include_router(scraper_router)
         dp.include_router(admin_router)
         dp.include_router(router)
         
@@ -312,7 +443,29 @@ async def main():
             coalesce=True,
             replace_existing=True,
         )
-        
+
+        # Ежедневный сбор данных Kaspi Marketing (только если scraper настроен)
+        if Config.KASPI_PAY_PHONE:
+            from apscheduler.triggers.cron import CronTrigger
+            scheduler.add_job(
+                scheduled_scrape_marketing,
+                trigger=CronTrigger(
+                    hour=Config.SCRAPE_SCHEDULE_HOUR,
+                    minute=Config.SCRAPE_SCHEDULE_MINUTE,
+                    timezone="Asia/Almaty",
+                ),
+                id="scrape_kaspi_marketing",
+                name="Сбор данных Kaspi Marketing",
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
+            logger.info(
+                "Запланирован скрапинг Kaspi Marketing: %02d:%02d (Almaty)",
+                Config.SCRAPE_SCHEDULE_HOUR,
+                Config.SCRAPE_SCHEDULE_MINUTE,
+            )
+
         # Запуск планировщика
         scheduler.start()
         logger.info(
@@ -325,12 +478,18 @@ async def main():
         
         # Запуск WhatsApp webhook-сервера
         await whatsapp_webhook.start()
-        
+
+        # Запуск TMA API-сервера
+        await tma_api_server.start()
+
         # Запуск polling (drop_pending_updates — не обрабатывать старые update-ы)
         try:
             await dp.start_polling(bot, drop_pending_updates=True)
         finally:
+            await tma_api_server.stop()
             await whatsapp_webhook.stop()
+            if browser_manager:
+                await browser_manager.close()
             await on_shutdown()
             scheduler.shutdown()
             await bot.session.close()

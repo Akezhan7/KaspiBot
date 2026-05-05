@@ -113,6 +113,28 @@ class Config:
         BASE_DIR / "data" / "documents" / "court_decision.pdf",
     ]
 
+    # === KASPI PAY (Scraper / Marketing) ===
+    KASPI_PAY_PHONE: str = os.getenv("KASPI_PAY_PHONE", "")
+    KASPI_PAY_URL: str = os.getenv("KASPI_PAY_URL", "https://kaspi.kz/mc")
+    KASPI_STORAGE_STATE_PATH: Path = BASE_DIR / "data" / "kaspi_auth_state.json"
+    PLAYWRIGHT_HEADLESS: bool = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
+    SCRAPE_SCHEDULE_HOUR: int = int(os.getenv("SCRAPE_SCHEDULE_HOUR", "3"))
+    SCRAPE_SCHEDULE_MINUTE: int = int(os.getenv("SCRAPE_SCHEDULE_MINUTE", "0"))
+    SCRAPE_ACTION_DELAY_MIN: float = float(os.getenv("SCRAPE_ACTION_DELAY_MIN", "1.0"))
+    SCRAPE_ACTION_DELAY_MAX: float = float(os.getenv("SCRAPE_ACTION_DELAY_MAX", "3.0"))
+    SMS_CODE_TIMEOUT_SECONDS: int = int(os.getenv("SMS_CODE_TIMEOUT_SECONDS", "300"))
+
+    # === TMA API (REST API для Telegram Mini App) ===
+    TMA_API_HOST: str = os.getenv("TMA_API_HOST", "0.0.0.0")
+    TMA_API_PORT: int = int(os.getenv("TMA_API_PORT", "8080"))
+    TMA_CORS_ORIGINS: List[str] = [
+        o.strip()
+        for o in os.getenv("TMA_CORS_ORIGINS", "https://web.telegram.org,https://t.me").split(",")
+        if o.strip()
+    ]
+    TMA_URL: str = os.getenv("TMA_URL", "")  # публичный URL TMA (для inline-кнопки /analytics)
+    TMA_DIST_PATH: Path = BASE_DIR / "tma" / "dist"  # путь к собранному фронтенду
+
     # === EXCLUDED SELLERS ===
     # Магазины, которые нужно исключить из уведомлений (например, собственный магазин)
     # Сравнение регистронезависимое — хранить в нижнем регистре

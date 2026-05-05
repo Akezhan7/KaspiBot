@@ -112,6 +112,55 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_legal_requests_status ON legal_requests(control_purchase_status)",
         ],
     ),
+    (
+        4,
+        "Новые таблицы: ads_data, scrape_logs, browser_sessions",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS ads_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_sku TEXT NOT NULL,
+                scraped_at TIMESTAMP NOT NULL,
+                period_start DATE,
+                period_end DATE,
+                source TEXT NOT NULL DEFAULT 'kaspi_marketing',
+                impressions INTEGER DEFAULT 0,
+                clicks INTEGER DEFAULT 0,
+                ctr REAL DEFAULT 0,
+                spend REAL DEFAULT 0,
+                cpc REAL DEFAULT 0,
+                orders INTEGER DEFAULT 0,
+                revenue REAL DEFAULT 0,
+                bonus_active INTEGER DEFAULT 0,
+                bonus_percent REAL DEFAULT 0,
+                raw_data TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_ads_data_sku ON ads_data(product_sku)",
+            "CREATE INDEX IF NOT EXISTS idx_ads_data_scraped ON ads_data(scraped_at)",
+            "CREATE INDEX IF NOT EXISTS idx_ads_data_source ON ads_data(source)",
+            """
+            CREATE TABLE IF NOT EXISTS scrape_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP,
+                products_scraped INTEGER DEFAULT 0,
+                errors TEXT,
+                status TEXT DEFAULT 'running'
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS browser_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP,
+                storage_state_path TEXT NOT NULL,
+                is_valid INTEGER DEFAULT 1,
+                last_used_at TIMESTAMP
+            )
+            """,
+        ],
+    ),
 ]
 
 

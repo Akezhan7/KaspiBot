@@ -10,6 +10,7 @@ from .recent_sellers import RecentSellersDB
 from .seller_workflow import SellerWorkflowDB
 from .message_log import MessageLogDB
 from .legal_requests import LegalRequestsDB
+from .ads_data import AdsDataDB, ScrapeLogsDB, BrowserSessionsDB
 
 __all__ = [
     'DatabaseSchema',
@@ -21,4 +22,7 @@ __all__ = [
     'SellerWorkflowDB',
     'MessageLogDB',
     'LegalRequestsDB',
+    'AdsDataDB',
+    'ScrapeLogsDB',
+    'BrowserSessionsDB',
 ]

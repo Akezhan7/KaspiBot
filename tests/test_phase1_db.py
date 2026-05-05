@@ -50,7 +50,7 @@ async def test_migration_version(db_path):
     await _init_db(db_path)
     migrations = DatabaseMigrations(db_path)
     version = await migrations.get_current_version()
-    assert version == 3  # 3 миграции в текущей версии
+    assert version == 4  # 4 миграции после добавления таблиц ads_data (фаза 11)
 
 
 # === SellerWorkflowDB ===

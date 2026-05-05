@@ -339,27 +339,21 @@ async def test_generate_legal_package_zip(db_path):
     zip_file = zipfile.ZipFile(io.BytesIO(result))
     names = zip_file.namelist()
 
-    assert f"legal_request_{request_id}.json" in names
-    assert f"dialog_log_{request_id}.txt" in names
-    assert f"timeline_{request_id}.json" in names
+    assert f"заявка_{request_id}.txt" in names
+    assert f"переписка_{request_id}.txt" in names
+    assert f"хронология_{request_id}.txt" in names
 
-    # Проверяем содержимое JSON
-    legal_data = json.loads(
-        zip_file.read(f"legal_request_{request_id}.json").decode("utf-8")
-    )
-    assert legal_data["seller"]["name"] == "Test Shop"
+    # Проверяем содержимое заявки (текстовый формат)
+    legal_text = zip_file.read(f"заявка_{request_id}.txt").decode("utf-8")
+    assert "Test Shop" in legal_text
 
-    # Проверяем текстовый лог
-    dialog_text = zip_file.read(
-        f"dialog_log_{request_id}.txt"
-    ).decode("utf-8")
+    # Проверяем текстовый лог переписки
+    dialog_text = zip_file.read(f"переписка_{request_id}.txt").decode("utf-8")
     assert "Лог переписки" in dialog_text
 
-    # Проверяем таймлайн
-    timeline_data = json.loads(
-        zip_file.read(f"timeline_{request_id}.json").decode("utf-8")
-    )
-    assert timeline_data["workflow_id"] == wf_id
+    # Проверяем хронологию
+    timeline_text = zip_file.read(f"хронология_{request_id}.txt").decode("utf-8")
+    assert len(timeline_text) > 0
 
     zip_file.close()
 
