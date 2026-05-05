@@ -54,7 +54,7 @@ def create_auth_middleware(
             return await handler(request)
 
         # Публичные маршруты без авторизации
-        if request.path == "/health" or request.path.startswith("/tma"):
+        if request.path == "/health" or request.path == "/favicon.ico" or request.path.startswith("/tma"):
             return await handler(request)
 
         auth_header = request.headers.get("Authorization", "")

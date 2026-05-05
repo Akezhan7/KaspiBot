@@ -147,7 +147,7 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
 
 
 async def _handle_products_list(request: web.Request) -> web.Response:
-    """GET /api/products?sort=spend_desc&limit=20&offset=0&period=30&q= — список товаров."""
+    """GET /api/products?sort=spend_desc&limit=20&offset=0&period=30&q=&bonus=&roi= — список товаров."""
     deps = request.app[_DEPS_KEY]
     ads_db: "AdsDataDB" = deps["ads_db"]
     products_db: "ProductsDB" = deps["products_db"]
@@ -157,14 +157,17 @@ async def _handle_products_list(request: web.Request) -> web.Response:
     offset = _parse_int_param(request, "offset", 0, 0)
     period = _parse_int_param(request, "period", 30, 1, 365)
     query_text = request.rel_url.query.get("q", "").strip()
+    bonus_filter = request.rel_url.query.get("bonus", "").strip().lower()  # with | without | ""
+    roi_filter = request.rel_url.query.get("roi", "").strip().lower()      # positive | negative | ""
 
     try:
         summaries = await ads_db.get_spend_revenue_summary(period_days=period)
 
-        # Фильтрация по поиску (если задан q)
+        # Фильтрация по поиску (SKU или название)
         if query_text:
-            q_lower = query_text.lower()
-            summaries = [s for s in summaries if q_lower in s["product_sku"].lower()]
+            matched_products = await products_db.search_products(query_text)
+            matched_skus = {p["master_sku"] for p in matched_products}
+            summaries = [s for s in summaries if s["product_sku"] in matched_skus]
 
         # Сборка элементов с расчётом ROI
         items: list[dict] = []
@@ -184,6 +187,20 @@ async def _handle_products_list(request: web.Request) -> web.Response:
                 "roi_percent": round(roi_percent, 2) if roi_percent is not None else None,
             })
 
+        if roi_filter in {"positive", "negative"}:
+            if roi_filter == "positive":
+                items = [i for i in items if i["roi_percent"] is not None and i["roi_percent"] > 0]
+            else:
+                items = [i for i in items if i["roi_percent"] is not None and i["roi_percent"] < 0]
+
+        if bonus_filter in {"with", "without"}:
+            no_bonus_rows = await ads_db.get_products_without_bonuses()
+            no_bonus_skus = {row["product_sku"] for row in no_bonus_rows}
+            if bonus_filter == "without":
+                items = [i for i in items if i["sku"] in no_bonus_skus]
+            else:
+                items = [i for i in items if i["sku"] not in no_bonus_skus]
+
         items = _sort_items_by(items, sort)
         total = len(items)
         page = items[offset: offset + limit]
@@ -199,6 +216,11 @@ async def _handle_products_list(request: web.Request) -> web.Response:
             "offset": offset,
             "sort": sort,
             "period_days": period,
+            "filters": {
+                "q": query_text,
+                "bonus": bonus_filter if bonus_filter in {"with", "without"} else "",
+                "roi": roi_filter if roi_filter in {"positive", "negative"} else "",
+            },
             "items": page,
         })
     except Exception as exc:
@@ -227,7 +249,19 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
         roas = await processor.calculate_roas(sku, period_days=period)
         cpc_eff = await processor.get_cpc_efficiency(sku)
         trends = await aggregator.get_trends(sku, days=trend_days)
-        latest = await ads_db.get_latest_by_sku(sku)
+        latest_marketing = await ads_db.get_latest_by_sku(sku, source="kaspi_marketing")
+        latest_bonus = await ads_db.get_latest_by_sku(sku, source="kaspi_bonus")
+
+        latest_data: dict | None = None
+        if latest_marketing:
+            latest_data = dict(latest_marketing)
+        elif latest_bonus:
+            latest_data = dict(latest_bonus)
+
+        if latest_data is not None and latest_bonus:
+            latest_data["bonus_active"] = latest_bonus.get("bonus_active", 0)
+            latest_data["bonus_percent"] = latest_bonus.get("bonus_percent", 0.0)
+            latest_data["bonus_scraped_at"] = latest_bonus.get("scraped_at")
 
         return web.json_response({
             "sku": sku,
@@ -237,7 +271,7 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
             "roas": roas,
             "cpc_efficiency": cpc_eff,
             "trends": trends,
-            "latest_data": latest,
+            "latest_data": latest_data,
             "period_days": period,
             "trend_days": trend_days,
         })
@@ -405,7 +439,7 @@ async def _handle_scrape_trigger(request: web.Request) -> web.Response:
 
     if scrape_trigger is None:
         return web.json_response(
-            {"error": "Scraper not configured (KASPI_PAY_PHONE not set)"},
+            {"error": "Scraper not configured (Kaspi auth not set)"},
             status=503,
         )
 

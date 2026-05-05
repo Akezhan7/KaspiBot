@@ -4,6 +4,7 @@
  */
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { PackageSearch } from "lucide-react";
 import type { ProductItem, ProductsQuery } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
@@ -28,6 +29,8 @@ export default function ProductsPage() {
   const [items, setItems] = useState<ProductItem[]>([]);
   const [total, setTotal] = useState(0);
   const [sort, setSort] = useState("spend_desc");
+  const [bonusFilter, setBonusFilter] = useState<"" | "with" | "without">("");
+  const [roiFilter, setRoiFilter] = useState<"" | "positive" | "negative">("");
   const [offset, setOffset] = useState(0);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -58,6 +61,8 @@ export default function ProductsPage() {
       period: 30,
     };
     if (debouncedQuery) params.q = debouncedQuery;
+    if (bonusFilter) params.bonus = bonusFilter;
+    if (roiFilter) params.roi = roiFilter;
 
     try {
       const res = await api.getProducts(params);
@@ -68,7 +73,7 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [api, sort, offset, debouncedQuery]);
+  }, [api, sort, offset, debouncedQuery, bonusFilter, roiFilter]);
 
   useEffect(() => {
     fetchProducts();
@@ -79,14 +84,17 @@ export default function ProductsPage() {
 
   return (
     <div className="page">
-      <h1 className="page-title">📦 Товары</h1>
+      <div className="title-row">
+        <PackageSearch className="title-icon" />
+        <h1 className="page-title">Товары</h1>
+      </div>
 
       {/* Фильтры */}
       <div className="filters-row">
         <input
           className="search-input"
           type="text"
-          placeholder="Поиск по SKU..."
+          placeholder="Поиск по SKU или названию..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -98,6 +106,33 @@ export default function ProductsPage() {
           {SORT_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
           ))}
+        </select>
+      </div>
+
+      <div className="filters-row">
+        <select
+          className="sort-select"
+          value={bonusFilter}
+          onChange={(e) => {
+            setBonusFilter(e.target.value as "" | "with" | "without");
+            setOffset(0);
+          }}
+        >
+          <option value="">Бонус: все</option>
+          <option value="with">С бонусом</option>
+          <option value="without">Без бонуса</option>
+        </select>
+        <select
+          className="sort-select"
+          value={roiFilter}
+          onChange={(e) => {
+            setRoiFilter(e.target.value as "" | "positive" | "negative");
+            setOffset(0);
+          }}
+        >
+          <option value="">ROI: все</option>
+          <option value="positive">ROI &gt; 0</option>
+          <option value="negative">ROI &lt; 0</option>
         </select>
       </div>
 

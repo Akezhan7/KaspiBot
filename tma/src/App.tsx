@@ -13,8 +13,9 @@ import NoBonusPage from "./pages/NoBonusPage";
 import MostClickablePage from "./pages/MostClickablePage";
 import TopPerformersPage from "./pages/TopPerformersPage";
 
-// Определяем base path для React Router (при раздаче из /tma/* — basePath = "/tma")
-const BASE_PATH = import.meta.env.BASE_URL ?? "/";
+// Нормализуем basename, чтобы работало и с /tma, и с /tma/
+const RAW_BASE_PATH = import.meta.env.BASE_URL ?? "/";
+const BASE_PATH = RAW_BASE_PATH === "/" ? "/" : RAW_BASE_PATH.replace(/\/$/, "");
 
 function App() {
   const { ready, expand, colorScheme, themeParams } = useTelegram();

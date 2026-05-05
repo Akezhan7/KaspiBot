@@ -48,6 +48,30 @@ export interface UseTelegramResult {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type TgWebApp = any;
 
+function extractInitDataFromUrl(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const sources = [window.location.hash, window.location.search]
+    .map((v) => (v.startsWith("#") || v.startsWith("?") ? v.slice(1) : v))
+    .filter(Boolean);
+
+  for (const source of sources) {
+    const params = new URLSearchParams(source);
+    const raw = params.get("tgWebAppData");
+    if (raw) {
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    }
+  }
+
+  return "";
+}
+
 function getTgWebApp(): TgWebApp | null {
   if (
     typeof window !== "undefined" &&
@@ -68,11 +92,12 @@ export function useTelegram(): UseTelegramResult {
   if (_cachedResult) return _cachedResult;
 
   const tg = getTgWebApp();
+  const initDataFromUrl = extractInitDataFromUrl();
 
   if (!tg) {
     // Stub для локальной разработки без Telegram
     _cachedResult = {
-      initData: "",
+      initData: initDataFromUrl,
       user: { id: 0, first_name: "Dev", username: "devuser" },
       colorScheme: "light",
       themeParams: {},
@@ -80,7 +105,7 @@ export function useTelegram(): UseTelegramResult {
       expand: () => {},
       showBackButton: () => {},
       hideBackButton: () => {},
-      isAvailable: false,
+      isAvailable: Boolean(initDataFromUrl),
     };
     return _cachedResult;
   }
@@ -107,7 +132,7 @@ export function useTelegram(): UseTelegramResult {
   };
 
   _cachedResult = {
-    initData: tg.initData ?? "",
+    initData: tg.initData || initDataFromUrl,
     user: tg.initDataUnsafe?.user ?? null,
     colorScheme: tg.colorScheme ?? "light",
     themeParams: tg.themeParams ?? {},

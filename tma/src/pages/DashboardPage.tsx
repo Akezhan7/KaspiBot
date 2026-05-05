@@ -1,10 +1,20 @@
+
 /**
  * Dashboard — главная страница TMA.
  * Показывает сводные метрики, сигналы и мини-статистику за 7 дней.
  */
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
+import {
+  AlertTriangle,
+  BadgeX,
+  ChartColumn,
+  MousePointerClick,
+  Package,
+  Trophy,
+  Wallet,
+} from "lucide-react";
 import type { DashboardResponse } from "../api/client";
 import { ApiError } from "../api/client";
 import { useApi } from "../hooks/useApi";
@@ -60,7 +70,10 @@ export default function DashboardPage() {
 
   return (
     <div className="page">
-      <h1 className="page-title">📊 Kaspi Ads Dashboard</h1>
+      <div className="title-row">
+        <ChartColumn className="title-icon" />
+        <h1 className="page-title">Kaspi Ads Dashboard</h1>
+      </div>
 
       {/* Alerts */}
       {alerts.length > 0 && (
@@ -71,6 +84,7 @@ export default function DashboardPage() {
               className={`alert alert-${a.type === "wasted_budget" ? "warning" : "info"}`}
               onClick={() => navigate(a.type === "wasted_budget" ? "/wasted-budget" : "/no-bonus")}
             >
+              {a.type === "wasted_budget" ? <AlertTriangle size={14} /> : <BadgeX size={14} />}
               {a.message}
             </div>
           ))}
@@ -114,11 +128,15 @@ export default function DashboardPage() {
 
       {/* Навигация */}
       <div className="nav-links">
-        <NavItem label="Все товары" path="/products" icon="📦" onClick={() => navigate("/products")} />
-        <NavItem label="Топ исполнители" path="/top-performers" icon="🏆" onClick={() => navigate("/top-performers")} />
-        <NavItem label="Слив бюджета" path="/wasted-budget" icon="🔥" onClick={() => navigate("/wasted-budget")} />
-        <NavItem label="Без бонусов" path="/no-bonus" icon="❌" onClick={() => navigate("/no-bonus")} />
-        <NavItem label="Кликабельные" path="/most-clickable" icon="👆" onClick={() => navigate("/most-clickable")} />
+        <NavItem label="Все товары" icon={<Package size={18} />} onClick={() => navigate("/products")} />
+        <NavItem label="Топ исполнители" icon={<Trophy size={18} />} onClick={() => navigate("/top-performers")} />
+        <NavItem label="Слив бюджета" icon={<Wallet size={18} />} onClick={() => navigate("/wasted-budget")} />
+        <NavItem label="Без бонусов" icon={<BadgeX size={18} />} onClick={() => navigate("/no-bonus")} />
+        <NavItem
+          label="Кликабельные"
+          icon={<MousePointerClick size={18} />}
+          onClick={() => navigate("/most-clickable")}
+        />
       </div>
 
       {/* Кнопка запуска скрапинга */}
@@ -127,7 +145,7 @@ export default function DashboardPage() {
         onClick={handleTriggerScrape}
         disabled={triggering}
       >
-        {triggering ? "Запускаю..." : "▶ Запустить сбор данных"}
+        {triggering ? "Запускаю..." : "Запустить сбор данных"}
       </button>
     </div>
   );
@@ -148,8 +166,7 @@ function NavItem({
   onClick,
 }: {
   label: string;
-  path: string;
-  icon: string;
+  icon: ReactNode;
   onClick: () => void;
 }) {
   return (

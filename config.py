@@ -115,7 +115,21 @@ class Config:
 
     # === KASPI PAY (Scraper / Marketing) ===
     KASPI_PAY_PHONE: str = os.getenv("KASPI_PAY_PHONE", "")
+    KASPI_PAY_LOGIN: str = os.getenv("KASPI_PAY_LOGIN", "")
+    KASPI_PAY_PASSWORD: str = os.getenv("KASPI_PAY_PASSWORD", "")
     KASPI_PAY_URL: str = os.getenv("KASPI_PAY_URL", "https://kaspi.kz/mc")
+    KASPI_MARKETING_ADS_URL: str = os.getenv(
+        "KASPI_MARKETING_ADS_URL",
+        "https://marketing.kaspi.kz/advertising/overview?activeTab=Enabled",
+    )
+    KASPI_BONUSES_REVIEWS_URL: str = os.getenv(
+        "KASPI_BONUSES_REVIEWS_URL",
+        "https://marketing.kaspi.kz/bonuses/reviews/promotions/list?state=Enabled",
+    )
+    KASPI_BONUSES_PRODUCTS_URL: str = os.getenv(
+        "KASPI_BONUSES_PRODUCTS_URL",
+        "https://marketing.kaspi.kz/bonuses/products/promotions/list?state=Enabled",
+    )
     KASPI_STORAGE_STATE_PATH: Path = BASE_DIR / "data" / "kaspi_auth_state.json"
     PLAYWRIGHT_HEADLESS: bool = os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true"
     SCRAPE_SCHEDULE_HOUR: int = int(os.getenv("SCRAPE_SCHEDULE_HOUR", "3"))
@@ -123,7 +137,8 @@ class Config:
     SCRAPE_ACTION_DELAY_MIN: float = float(os.getenv("SCRAPE_ACTION_DELAY_MIN", "1.0"))
     SCRAPE_ACTION_DELAY_MAX: float = float(os.getenv("SCRAPE_ACTION_DELAY_MAX", "3.0"))
     SMS_CODE_TIMEOUT_SECONDS: int = int(os.getenv("SMS_CODE_TIMEOUT_SECONDS", "300"))
-    KASPI_PAY_NAV_TIMEOUT_SECONDS: int = int(os.getenv("KASPI_PAY_NAV_TIMEOUT_SECONDS", "120"))
+    KASPI_PAY_NAV_TIMEOUT_SECONDS: int = int(os.getenv("KASPI_PAY_NAV_TIMEOUT_SECONDS", "60"))
+    KASPI_MARKETING_REPORT_DAYS: int = int(os.getenv("KASPI_MARKETING_REPORT_DAYS", "7"))
 
     # === TMA API (REST API для Telegram Mini App) ===
     TMA_API_HOST: str = os.getenv("TMA_API_HOST", "0.0.0.0")
@@ -140,6 +155,33 @@ class Config:
     # Магазины, которые нужно исключить из уведомлений (например, собственный магазин)
     # Сравнение регистронезависимое — хранить в нижнем регистре
     EXCLUDED_SELLER_NAMES: List[str] = ["pks ltd", "pks market"]
+
+    @classmethod
+    def has_kaspi_phone_auth(cls) -> bool:
+        """Настроена авторизация Kaspi Pay через телефон (+ SMS)."""
+        return bool(cls.KASPI_PAY_PHONE.strip())
+
+    @classmethod
+    def has_kaspi_password_auth(cls) -> bool:
+        """Настроена авторизация Kaspi Pay через логин/пароль."""
+        return bool(cls.KASPI_PAY_LOGIN.strip() and cls.KASPI_PAY_PASSWORD.strip())
+
+    @classmethod
+    def is_kaspi_pay_enabled(cls) -> bool:
+        """Есть минимум один валидный способ авторизации в Kaspi Pay."""
+        return cls.has_kaspi_password_auth() or cls.has_kaspi_phone_auth()
+
+    @classmethod
+    def get_kaspi_pay_proxy_url(cls) -> str:
+        """Proxy URL для Kaspi Pay.
+
+        Если KASPI_PAY_PROXY_URL не задан, используется общий PROXY_URL.
+        Если KASPI_PAY_PROXY_URL задан пустым, прокси для Kaspi Pay отключается.
+        """
+        override = os.getenv("KASPI_PAY_PROXY_URL")
+        if override is None:
+            return cls.PROXY_URL.strip()
+        return override.strip()
     
     @classmethod
     def validate(cls) -> None:

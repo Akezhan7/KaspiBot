@@ -4,6 +4,7 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { Activity, CircleX, Gift } from "lucide-react";
 import {
   LineChart,
   Line,
@@ -65,18 +66,21 @@ export default function ProductDetailPage() {
 
   return (
     <div className="page">
-      <h1 className="page-title">{data.title ?? data.sku}</h1>
+      <div className="title-row">
+        <Activity className="title-icon" />
+        <h1 className="page-title">{data.title ?? data.sku}</h1>
+      </div>
       <div className="sku-label">{data.sku}</div>
 
       {/* Основные метрики */}
       <div className="metrics-grid">
         <MetricCard
           label="Потрачено"
-          value={`${fmt(roi?.total_spend)} ₸`}
+          value={`${fmt(roi?.spend)} ₸`}
         />
         <MetricCard
           label="Выручка"
-          value={`${fmt(roi?.total_revenue)} ₸`}
+          value={`${fmt(roi?.revenue)} ₸`}
         />
         <MetricCard
           label="ROI"
@@ -92,8 +96,11 @@ export default function ProductDetailPage() {
       {/* Бонус */}
       <div className={`bonus-badge ${bonusActive ? "bonus-active" : "bonus-inactive"}`}>
         {bonusActive
-          ? `✓ Бонус активен: ${bonusPercent ?? "—"}%`
-          : "✗ Бонус не активен"}
+          ? `Бонус активен: ${bonusPercent ?? "—"}%`
+          : "Бонус не активен"}
+        <span className="bonus-icon-wrap">
+          {bonusActive ? <Gift size={14} /> : <CircleX size={14} />}
+        </span>
       </div>
 
       {/* Выбор периода тренда */}
@@ -151,7 +158,7 @@ export default function ProductDetailPage() {
               <Tooltip formatter={(v) => [`${Number(v).toFixed(2)}%`, "CTR"]} />
               <Line
                 type="monotone"
-                dataKey="avg_ctr"
+                dataKey="ctr"
                 stroke="#4caf50"
                 dot={false}
                 name="CTR%"

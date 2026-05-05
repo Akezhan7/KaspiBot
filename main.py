@@ -115,16 +115,23 @@ async def scheduled_scrape_marketing():
     log_id = await scrape_logs_db.create_log()
 
     try:
-        # Проверяем сессию; если истекла — уведомляем и выходим
+        # Проверяем сессию; при истечении пытаемся автоматически перелогиниться.
         if not await kaspi_auth.is_session_valid():
-            msg = (
-                "Kaspi Pay: сессия истекла — сбор данных пропущен.\n"
-                "Выполните /login_kaspi для повторной авторизации."
-            )
-            logger.warning(msg)
-            await notification_service.send_to_admins(msg)
-            await scrape_logs_db.update_log(log_id, status="failed", errors="Сессия истекла")
-            return
+            logger.warning("Kaspi Pay: сессия невалидна, пробуем автоматическую авторизацию")
+            relogin_ok = await kaspi_auth.login()
+            if not relogin_ok:
+                msg = (
+                    "Kaspi Pay: сессия истекла и авто-авторизация не удалась — сбор данных пропущен.\n"
+                    "Выполните /login_kaspi для ручной авторизации."
+                )
+                logger.warning(msg)
+                await notification_service.send_to_admins(msg)
+                await scrape_logs_db.update_log(
+                    log_id,
+                    status="failed",
+                    errors="Сессия истекла, авто-авторизация не удалась",
+                )
+                return
 
         result = await marketing_scraper.scrape_all()
         scraped_at = result.scraped_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -232,7 +239,7 @@ async def on_shutdown():
 async def main():
     """Главная функция"""
     global bot, notification_service, scanner, workflow_engine, escalation_scheduler
-    global browser_manager, kaspi_auth
+    global browser_manager, kaspi_auth, marketing_scraper
     tma_api_server: TMAApiServer = None
     
     # Настройка логирования
@@ -301,16 +308,16 @@ async def main():
         # Инициализация планировщика эскалации
         escalation_scheduler = EscalationScheduler(workflow_engine)
         
-        # Инициализация Kaspi Pay scraper (если настроен)
-        if Config.KASPI_PAY_PHONE:
+        # Инициализация Kaspi Pay scraper (если настроен любой способ auth)
+        if Config.is_kaspi_pay_enabled():
             browser_manager = BrowserManager(
                 storage_state_path=Config.KASPI_STORAGE_STATE_PATH,
-                proxy_url=Config.PROXY_URL or None,
+                proxy_url=Config.get_kaspi_pay_proxy_url() or None,
                 headless=Config.PLAYWRIGHT_HEADLESS,
             )
             await browser_manager.launch()
 
-            kaspi_auth = KaspiAuthManager(browser_manager)
+            kaspi_auth = KaspiAuthManager(browser_manager, db_path=db_path)
             kaspi_auth.set_notify_callback(notification_service.send_to_admins)
             set_auth_manager(kaspi_auth)
 
@@ -325,7 +332,9 @@ async def main():
 
             logger.info("Kaspi Pay scraper инициализирован")
         else:
-            logger.info("KASPI_PAY_PHONE не задан — Kaspi Pay scraper отключен")
+            logger.info(
+                "Kaspi Pay auth не настроен (ожидается KASPI_PAY_LOGIN/KASPI_PAY_PASSWORD или KASPI_PAY_PHONE) — scraper отключен"
+            )
 
         # Инициализация аналитики
         ads_data_db_analytics = AdsDataDB(db_path)
@@ -352,7 +361,7 @@ async def main():
             host=Config.TMA_API_HOST,
             port=Config.TMA_API_PORT,
             cors_origins=Config.TMA_CORS_ORIGINS,
-            scrape_trigger=scheduled_scrape_marketing if Config.KASPI_PAY_PHONE else None,
+            scrape_trigger=scheduled_scrape_marketing if Config.is_kaspi_pay_enabled() else None,
             tma_dist_path=Config.TMA_DIST_PATH,
         )
 
@@ -445,7 +454,7 @@ async def main():
         )
 
         # Ежедневный сбор данных Kaspi Marketing (только если scraper настроен)
-        if Config.KASPI_PAY_PHONE:
+        if Config.is_kaspi_pay_enabled():
             from apscheduler.triggers.cron import CronTrigger
             scheduler.add_job(
                 scheduled_scrape_marketing,

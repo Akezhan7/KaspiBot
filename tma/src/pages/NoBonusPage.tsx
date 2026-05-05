@@ -4,6 +4,7 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { BadgeX } from "lucide-react";
 import type { AdsItem } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
@@ -35,14 +36,17 @@ export default function NoBonusPage() {
 
   return (
     <div className="page">
-      <h1 className="page-title">❌ Без бонусов</h1>
+      <div className="title-row">
+        <BadgeX className="title-icon" />
+        <h1 className="page-title">Без бонусов</h1>
+      </div>
       <p className="page-subtitle">
         Товары без активных бонусов — {items.length} позиций
       </p>
 
       {items.length === 0 ? (
         <div className="empty-state success">
-          ✓ У всех товаров активен бонус!
+          У всех товаров активен бонус
         </div>
       ) : (
         <div className="product-list">

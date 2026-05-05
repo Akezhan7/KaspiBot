@@ -4,6 +4,7 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { TriangleAlert } from "lucide-react";
 import type { WastedBudgetItem } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
@@ -41,14 +42,17 @@ export default function WastedBudgetPage() {
 
   return (
     <div className="page">
-      <h1 className="page-title">🔥 Слив бюджета</h1>
+      <div className="title-row">
+        <TriangleAlert className="title-icon" />
+        <h1 className="page-title">Слив бюджета</h1>
+      </div>
       <p className="page-subtitle">
         Товары с отрицательным ROI — затраты превышают выручку
       </p>
 
       {sorted.length === 0 ? (
         <div className="empty-state success">
-          ✓ Все товары в плюсе — нет потерь!
+          Все товары в плюсе — потерь не обнаружено
         </div>
       ) : (
         <div className="product-list">
@@ -83,7 +87,7 @@ function WastedItem({
         <div className="product-title">{item.title ?? item.sku}</div>
         <div className="product-sku">{item.sku}</div>
         <div className="wasted-recommendation">
-          💡 Проверить ставки или приостановить кампанию
+          Проверить ставки или приостановить кампанию
         </div>
       </div>
       <div className="product-row-metrics">

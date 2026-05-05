@@ -158,6 +158,8 @@ export interface ProductsQuery {
   offset?: number;
   period?: number;
   q?: string;
+  bonus?: "with" | "without";
+  roi?: "positive" | "negative";
 }
 
 export interface ProductsResponse {
@@ -174,17 +176,17 @@ export interface TrendPoint {
   impressions: number;
   clicks: number;
   spend: number;
-  avg_ctr: number;
-  avg_cpc: number;
+  ctr: number;
+  cpc: number;
 }
 
 export interface RoiData {
   sku: string;
   period_days: number;
-  total_spend: number;
-  total_revenue: number;
+  spend: number;
+  revenue: number;
   roi_percent: number | null;
-  orders: number;
+  has_revenue_data: boolean;
 }
 
 export interface ProductDetailResponse {
