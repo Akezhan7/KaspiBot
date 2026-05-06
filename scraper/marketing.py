@@ -451,7 +451,7 @@ class MarketingScraper:
 
         if header_idx is not None:
             headers = [self._normalize_header(v) for v in rows[header_idx]]
-            idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product"])
+            idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description"])
             idx_status = self._find_col(headers, ["статус", "состоя", "active", "status", "state"])
             idx_percent = self._find_col(headers, ["бонус", "процент", "%", "bonus"])
             data_rows = rows[header_idx + 1 :]
@@ -580,7 +580,7 @@ class MarketingScraper:
             return fallback_rows
 
         headers = [self._normalize_header(v) for v in rows[header_idx]]
-        idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product"])
+        idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description"])
         idx_clicks = self._find_col(headers, ["клик", "переход", "click"])
         idx_cpc = self._find_col(headers, ["ср. стоим", "средняя стоим", "cpc", "avg cost"])
         idx_spend = self._find_spend_column(headers)
@@ -786,7 +786,7 @@ class MarketingScraper:
             return fallback_rows
 
         headers = [self._normalize_header(v) for v in rows[header_idx]]
-        idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product"])
+        idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description"])
         idx_clicks = self._find_col(headers, ["клик", "переход", "click"])
         idx_cpc = self._find_col(headers, ["ср. стоим", "средняя стоим", "cpc", "avg cost"])
         idx_spend = self._find_spend_column(headers)
@@ -865,11 +865,24 @@ class MarketingScraper:
             if len(values) < 3:
                 continue
 
-            product_name = values[0]
+            # Найти колонку, которая больше всего похожа на название товара
+            # (содержит буквы, не только цифры, не "итого"/"всего"/"total"/"№")
+            name_candidates = [
+                v for v in values
+                if len(v.strip()) > 3
+                and re.search(r"[a-zA-Zа-яА-ЯёЁ]", v)
+                and not re.match(r"^\d+$", v.strip())
+                and not v.lower().startswith(("итого", "всего", "total", "№", "#", "id"))
+            ]
+            if name_candidates:
+                product_name = max(name_candidates, key=len)
+            else:
+                product_name = values[0]
+
             if not product_name or product_name.lower().startswith(("итого", "всего", "total")):
                 continue
 
-            numeric_cells = [value for value in values[1:] if re.search(r"\d", value)]
+            numeric_cells = [value for value in values if re.search(r"\d", value) and value != product_name]
             if len(numeric_cells) < 2:
                 continue
 
@@ -912,7 +925,12 @@ class MarketingScraper:
             if clicks == 0 and impressions == 0 and spend == 0.0:
                 continue
 
-            sku = self._extract_or_build_sku(product_name)
+            # Попробуем найти числовой ID (5-12 цифр) в любой колонке для SKU
+            sku_candidates = [v for v in values if re.match(r"^\d{5,12}$", v.strip())]
+            if sku_candidates:
+                sku = sku_candidates[0]
+            else:
+                sku = self._extract_or_build_sku(product_name)
             campaigns.append(
                 AdCampaignData(
                     product_sku=sku,
