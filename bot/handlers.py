@@ -11,6 +11,7 @@ from aiogram.utils.markdown import hcode
 from config import Config, now_kz
 from database import ProductsDB, ProductSellersDB, ScanLogsDB, SellersDB, RecentSellersDB
 from parser import KaspiParser
+from parser.title_utils import clean_product_title
 from .utils import validate_kaspi_url, paginate_list
 
 logger = logging.getLogger(__name__)
@@ -165,7 +166,7 @@ async def cmd_add(message: Message):
             # Сначала пытаемся получить через product API
             product_info = await parser.get_product_info(master_sku)
             if product_info:
-                product_title = (
+                product_title = clean_product_title(
                     product_info.get('title') or 
                     product_info.get('name') or 
                     product_info.get('productName')
@@ -177,7 +178,7 @@ async def cmd_add(message: Message):
                 success, offers = await parser.get_product_offers(master_sku)
                 if success and offers and len(offers) > 0:
                     # Пробуем разные поля для названия
-                    product_title = (
+                    product_title = clean_product_title(
                         offers[0].get('productName') or 
                         offers[0].get('title') or 
                         offers[0].get('name')

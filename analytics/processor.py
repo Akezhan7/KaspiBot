@@ -15,6 +15,8 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from parser.title_utils import clean_product_title
+
 if TYPE_CHECKING:
     from database.ads_data import AdsDataDB
     from database.products import ProductsDB
@@ -30,16 +32,16 @@ async def _resolve_title(
 ) -> str:
     """Получить название товара из products.title или fallback на ads_data.raw_data.product_name."""
     product = await products_db.get_product(sku)
-    if product and product.get("title"):
+    if product and clean_product_title(product.get("title")):
         return product["title"]
 
     latest = await ads_db.get_latest_by_sku(sku)
     if latest and latest.get("raw_data"):
         try:
             raw = json.loads(latest["raw_data"])
-            name = raw.get("product_name")
+            name = clean_product_title(raw.get("product_name"))
             if name:
-                return str(name)
+                return name
         except Exception:
             pass
 

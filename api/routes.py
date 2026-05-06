@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
+from parser.title_utils import clean_product_title
 from ._keys import DEPS_KEY as _DEPS_KEY
 
 if TYPE_CHECKING:
@@ -54,16 +55,20 @@ async def _enrich_title(
 ) -> str:
     """Получить название товара: из products.title или fallback на ads_data.raw_data.product_name."""
     product = await products_db.get_product(sku)
-    if product and product.get("title"):
-        return product["title"]
+    title = None
+
+    if product:
+        title = clean_product_title(product.get("title"))
+        if title:
+            return title
 
     latest = await ads_db.get_latest_by_sku(sku)
     if latest and latest.get("raw_data"):
         try:
             raw = json.loads(latest["raw_data"])
-            name = raw.get("product_name")
-            if name:
-                return str(name)
+            title = clean_product_title(raw.get("product_name"))
+            if title:
+                return title
         except Exception:
             pass
 

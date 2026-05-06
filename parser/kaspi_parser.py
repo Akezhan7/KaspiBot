@@ -8,6 +8,7 @@ import asyncio
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 from config import Config
+from .title_utils import clean_product_title
 
 logger = logging.getLogger(__name__)
 
@@ -125,20 +126,25 @@ class KaspiParser:
         product_name = None
         
         # Сначала пробуем корень ответа
-        product_name = data.get("name") or data.get("productName") or data.get("title") or data.get("product", {}).get("name")
+        product_name = clean_product_title(
+            data.get("name") or 
+            data.get("productName") or 
+            data.get("title") or 
+            data.get("product", {}).get("name")
+        )
         
         # Если не нашли, ищем в offers (проходим по всем, т.к. у первого может быть пустой)
         if not product_name and offers:
             for offer in offers:
-                title = offer.get("title", "").strip()
-                if title:  # Нашли непустой title
+                title = clean_product_title(offer.get("title"))
+                if title:
                     product_name = title
                     break
             
-            # Если все title пустые, пробуем другие поля
+            # Если все title пустые или невалидные, пробуем другие поля
             if not product_name:
                 first_offer = offers[0]
-                product_name = (
+                product_name = clean_product_title(
                     first_offer.get("productName") or 
                     first_offer.get("name")
                 )
@@ -150,7 +156,7 @@ class KaspiParser:
                         # Убираем префикс "Master - "
                         product_name = master_category.replace("Master - ", "")
                     elif master_category:
-                        product_name = master_category
+                        product_name = clean_product_title(master_category)
         
         # Последний fallback - если совсем ничего не нашли, используем SKU
         if not product_name:

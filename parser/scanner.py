@@ -9,6 +9,7 @@ from datetime import datetime
 from config import Config
 from database import ProductsDB, SellersDB, ProductSellersDB, ScanLogsDB, RecentSellersDB
 from parser import ProxyManager, KaspiParser
+from .title_utils import clean_product_title
 
 logger = logging.getLogger(__name__)
 
@@ -93,21 +94,21 @@ class ProductScanner:
             if needs_title_update:
                 # Сначала пробуем получить из offers (если есть)
                 if offers and len(offers) > 0:
-                    product_title = (
+                    product_title = clean_product_title(
                         offers[0].get('productName') or 
                         offers[0].get('title') or 
                         offers[0].get('name')
                     )
                 
-                # Если в offers нет названия - запрашиваем через product API
-                if not product_title or product_title == 'Без названия' or product_title.startswith('Товар '):
+                # Если в offers нет корректного названия - запрашиваем через product API
+                if not product_title:
                     try:
                         product_info = await self.parser.get_product_info(master_sku)
                         await self.proxy_manager.increment_and_check_ip()
                         await self.proxy_manager.delay_for_product()
                         
                         if product_info:
-                            product_title = (
+                            product_title = clean_product_title(
                                 product_info.get('title') or 
                                 product_info.get('name') or 
                                 product_info.get('productName')
@@ -117,7 +118,7 @@ class ProductScanner:
                         logger.warning(f"Не удалось получить название через product API: {e}")
                 
                 # Обновим название в БД если нашли нормальное название
-                if product_title and product_title != 'Без названия' and not product_title.startswith('Товар '):
+                if product_title:
                     await self.products_db.update_product_title(master_sku, product_title)
                     logger.info(f"Обновлено название товара {master_sku}: {product_title[:50]}")
             
