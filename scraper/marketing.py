@@ -1182,7 +1182,7 @@ class MarketingScraper:
         if extracted:
             return extracted.group(1).upper()
 
-        numeric = re.search(r"\b\d{6,12}\b", product_name)
+        numeric = re.search(r"\b\d{5,12}\b", product_name)
         if numeric:
             return numeric.group(0)
 
@@ -1423,7 +1423,7 @@ class MarketingScraper:
         lines = [ln.strip() for ln in cell_text.split("\n") if ln.strip()]
 
         # Паттерн: артикул на отдельной строке (только цифры / цифры с буквами)
-        sku_pattern = re.compile(r"^\d{6,12}$|^[A-Z0-9\-]{6,20}$")
+        sku_pattern = re.compile(r"^\d{5,12}$|^[A-Z0-9\-]{5,20}$")
 
         sku = ""
         name = ""

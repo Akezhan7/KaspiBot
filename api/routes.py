@@ -29,6 +29,7 @@ API маршруты TMA Dashboard.
   GET  /tma/{path:.*}              — TMA SPA fallback / статические файлы
 """
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -43,6 +44,31 @@ if TYPE_CHECKING:
     from database.products import ProductsDB
 
 logger = logging.getLogger(__name__)
+
+
+async def _enrich_title(
+    sku: str,
+    products_db: "ProductsDB",
+    ads_db: "AdsDataDB",
+    default: str | None = None,
+) -> str:
+    """Получить название товара: из products.title или fallback на ads_data.raw_data.product_name."""
+    product = await products_db.get_product(sku)
+    if product and product.get("title"):
+        return product["title"]
+
+    latest = await ads_db.get_latest_by_sku(sku)
+    if latest and latest.get("raw_data"):
+        try:
+            raw = json.loads(latest["raw_data"])
+            name = raw.get("product_name")
+            if name:
+                return str(name)
+        except Exception:
+            pass
+
+    return default if default is not None else sku
+
 
 # Допустимые значения sort для /api/products
 _ALLOWED_SORT_KEYS = {
@@ -207,8 +233,7 @@ async def _handle_products_list(request: web.Request) -> web.Response:
 
         # Обогащение названиями из products (только для текущей страницы)
         for item in page:
-            product = await products_db.get_product(item["sku"])
-            item["title"] = product["title"] if product else item["sku"]
+            item["title"] = await _enrich_title(item["sku"], products_db, ads_db)
 
         return web.json_response({
             "total": total,
@@ -292,10 +317,10 @@ async def _handle_top_spenders(request: web.Request) -> web.Response:
         rows = await ads_db.get_top_spenders(limit=limit)
         result = []
         for row in rows:
-            product = await products_db.get_product(row["product_sku"])
+            title = await _enrich_title(row["product_sku"], products_db, ads_db)
             result.append({
                 "sku": row["product_sku"],
-                "title": product["title"] if product else row["product_sku"],
+                "title": title,
                 "total_spend": round(_safe_float(row["total_spend"]), 2),
                 "total_clicks": _safe_int(row["total_clicks"]),
                 "total_impressions": _safe_int(row["total_impressions"]),
@@ -319,8 +344,7 @@ async def _handle_top_performers(request: web.Request) -> web.Response:
     try:
         items = await processor.get_top_performers(limit=limit)
         for item in items:
-            product = await products_db.get_product(item["sku"])
-            item["title"] = product["title"] if product else item["sku"]
+            item["title"] = await _enrich_title(item["sku"], products_db, ads_db)
         return web.json_response({"items": items, "count": len(items)})
     except Exception as exc:
         logger.error("top_performers: ошибка: %s", exc, exc_info=True)
@@ -369,8 +393,7 @@ async def _handle_wasted_budget(request: web.Request) -> web.Response:
     try:
         items = await processor.get_wasted_budget(threshold_roi=threshold)
         for item in items:
-            product = await products_db.get_product(item["sku"])
-            item["title"] = product["title"] if product else item["sku"]
+            item["title"] = await _enrich_title(item["sku"], products_db, ads_db)
         return web.json_response({"items": items, "count": len(items), "threshold": threshold})
     except Exception as exc:
         logger.error("wasted_budget: ошибка: %s", exc, exc_info=True)
