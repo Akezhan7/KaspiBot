@@ -183,7 +183,12 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
 
 
 async def _handle_products_list(request: web.Request) -> web.Response:
-    """GET /api/products?sort=spend_desc&limit=20&offset=0&period=30&q=&bonus=&roi= — список товаров."""
+    """GET /api/products?sort=spend_desc&limit=20&offset=0&period=30&q=&ads=with|without — каталог товаров.
+
+    Первичный источник — таблица products (реальные названия).
+    Ads-метрики наслаиваются где SKU совпадает с ads_data.
+    Параметр ads=with: только товары с данными рекламы; ads=without: без рекламы.
+    """
     deps = request.app[_DEPS_KEY]
     ads_db: "AdsDataDB" = deps["ads_db"]
     products_db: "ProductsDB" = deps["products_db"]
@@ -193,58 +198,50 @@ async def _handle_products_list(request: web.Request) -> web.Response:
     offset = _parse_int_param(request, "offset", 0, 0)
     period = _parse_int_param(request, "period", 30, 1, 365)
     query_text = request.rel_url.query.get("q", "").strip()
-    bonus_filter = request.rel_url.query.get("bonus", "").strip().lower()  # with | without | ""
-    roi_filter = request.rel_url.query.get("roi", "").strip().lower()      # positive | negative | ""
+    ads_filter = request.rel_url.query.get("ads", "").strip().lower()  # with | without | ""
 
     try:
-        summaries = await ads_db.get_spend_revenue_summary(period_days=period)
-
-        # Фильтрация по поиску (SKU или название)
+        # Первичный источник: таблица products (реальные названия)
         if query_text:
-            matched_products = await products_db.search_products(query_text)
-            matched_skus = {p["master_sku"] for p in matched_products}
-            summaries = [s for s in summaries if s["product_sku"] in matched_skus]
+            catalog = await products_db.search_products(query_text)
+        else:
+            catalog = await products_db.get_all_products()
 
-        # Сборка элементов с расчётом ROI
+        # Рекламные метрики по SKU за период
+        ads_summaries: dict[str, dict] = {
+            row["product_sku"]: row
+            for row in await ads_db.get_spend_revenue_summary(period_days=period)
+        }
+
+        # Сборка: каталожный товар + наслоение рекламных данных
         items: list[dict] = []
-        for row in summaries:
-            spend = _safe_float(row["total_spend"])
-            revenue = _safe_float(row["total_revenue"])
-            # roi_percent = None когда нет данных о выручке (revenue всегда 0 из Kaspi Marketing)
-            roi_percent = (revenue - spend) / spend * 100.0 if spend > 0 and revenue > 0 else None
+        for product in catalog:
+            sku = product["master_sku"]
+            ads = ads_summaries.get(sku, {})
+            has_ads = sku in ads_summaries
+            spend = _safe_float(ads.get("total_spend"))
             items.append({
-                "sku": row["product_sku"],
-                "title": None,           # будет заполнено для текущей страницы
+                "sku": sku,
+                "title": product.get("title") or sku,
+                "url": product.get("url"),
+                "has_ads": has_ads,
                 "spend": round(spend, 2),
-                "revenue": round(revenue, 2),
-                "clicks": _safe_int(row["total_clicks"]),
-                "impressions": _safe_int(row["total_impressions"]),
-                "avg_ctr": round(_safe_float(row["avg_ctr"]), 3),
-                "avg_cpc": round(_safe_float(row["avg_cpc"]), 2),
-                "roi_percent": round(roi_percent, 2) if roi_percent is not None else None,
+                "revenue": 0.0,
+                "clicks": _safe_int(ads.get("total_clicks")),
+                "impressions": _safe_int(ads.get("total_impressions")),
+                "avg_ctr": round(_safe_float(ads.get("avg_ctr")), 3),
+                "avg_cpc": round(_safe_float(ads.get("avg_cpc")), 2),
+                "roi_percent": None,
             })
 
-        if roi_filter in {"positive", "negative"}:
-            if roi_filter == "positive":
-                items = [i for i in items if i["roi_percent"] is not None and i["roi_percent"] > 0]
-            else:
-                items = [i for i in items if i["roi_percent"] is not None and i["roi_percent"] < 0]
-
-        if bonus_filter in {"with", "without"}:
-            no_bonus_rows = await ads_db.get_products_without_bonuses()
-            no_bonus_skus = {row["product_sku"] for row in no_bonus_rows}
-            if bonus_filter == "without":
-                items = [i for i in items if i["sku"] in no_bonus_skus]
-            else:
-                items = [i for i in items if i["sku"] not in no_bonus_skus]
+        if ads_filter == "with":
+            items = [i for i in items if i["has_ads"]]
+        elif ads_filter == "without":
+            items = [i for i in items if not i["has_ads"]]
 
         items = _sort_items_by(items, sort)
         total = len(items)
         page = items[offset: offset + limit]
-
-        # Обогащение названиями из products (только для текущей страницы)
-        for item in page:
-            item["title"] = await _enrich_title(item["sku"], products_db, ads_db)
 
         return web.json_response({
             "total": total,
@@ -254,8 +251,7 @@ async def _handle_products_list(request: web.Request) -> web.Response:
             "period_days": period,
             "filters": {
                 "q": query_text,
-                "bonus": bonus_filter if bonus_filter in {"with", "without"} else "",
-                "roi": roi_filter if roi_filter in {"positive", "negative"} else "",
+                "ads": ads_filter if ads_filter in {"with", "without"} else "",
             },
             "items": page,
         })

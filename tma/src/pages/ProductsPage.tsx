@@ -1,10 +1,10 @@
 /**
- * Products — список всех товаров с рекламными метриками.
- * Пагинация, сортировка, фильтры, поиск.
+ * Products — каталог товаров с наслоением рекламных метрик.
+ * Первичный источник — таблица products (реальные названия, 539+ позиций).
+ * Для товаров с активной рекламой показывает spend, CTR, клики.
  */
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { PackageSearch } from "lucide-react";
 import type { ProductItem, ProductsQuery } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
@@ -12,11 +12,9 @@ import "../styles/pages.css";
 
 const SORT_OPTIONS = [
   { value: "spend_desc", label: "По затратам ↓" },
-  { value: "spend_asc", label: "По затратам ↑" },
-  { value: "ctr_desc", label: "По CTR ↓" },
-  { value: "clicks_desc", label: "По кликам ↓" },
-  { value: "roi_desc", label: "По ROI ↓" },
-  { value: "roi_asc", label: "По ROI ↑" },
+  { value: "spend_asc",  label: "По затратам ↑" },
+  { value: "ctr_desc",   label: "По CTR ↓" },
+  { value: "clicks_desc",label: "По кликам ↓" },
 ];
 
 const PAGE_SIZE = 20;
@@ -29,8 +27,7 @@ export default function ProductsPage() {
   const [items, setItems] = useState<ProductItem[]>([]);
   const [total, setTotal] = useState(0);
   const [sort, setSort] = useState("spend_desc");
-  const [bonusFilter, setBonusFilter] = useState<"" | "with" | "without">("");
-  const [roiFilter, setRoiFilter] = useState<"" | "positive" | "negative">("");
+  const [adsFilter, setAdsFilter] = useState<"" | "with" | "without">("");
   const [offset, setOffset] = useState(0);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -41,7 +38,6 @@ export default function ProductsPage() {
     showBackButton(() => navigate("/"));
   }, [showBackButton, navigate]);
 
-  // Debounce для поиска
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedQuery(query);
@@ -54,15 +50,9 @@ export default function ProductsPage() {
     if (!api) return;
     setLoading(true);
     setError(null);
-    const params: ProductsQuery = {
-      sort,
-      limit: PAGE_SIZE,
-      offset,
-      period: 30,
-    };
+    const params: ProductsQuery = { sort, limit: PAGE_SIZE, offset, period: 30 };
     if (debouncedQuery) params.q = debouncedQuery;
-    if (bonusFilter) params.bonus = bonusFilter;
-    if (roiFilter) params.roi = roiFilter;
+    if (adsFilter)       params.ads = adsFilter;
 
     try {
       const res = await api.getProducts(params);
@@ -73,28 +63,23 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [api, sort, offset, debouncedQuery, bonusFilter, roiFilter]);
+  }, [api, sort, offset, debouncedQuery, adsFilter]);
 
-  useEffect(() => {
-    fetchProducts();
-  }, [fetchProducts]);
+  useEffect(() => { fetchProducts(); }, [fetchProducts]);
 
-  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const totalPages  = Math.ceil(total / PAGE_SIZE);
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
 
   return (
     <div className="page">
-      <div className="title-row">
-        <PackageSearch className="title-icon" />
-        <h1 className="page-title">Товары</h1>
-      </div>
+      <h1 className="page-title">Товары</h1>
 
-      {/* Фильтры */}
+      {/* Строка поиска + сортировка */}
       <div className="filters-row">
         <input
           className="search-input"
           type="text"
-          placeholder="Поиск по SKU или названию..."
+          placeholder="Поиск по названию или SKU..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -109,31 +94,17 @@ export default function ProductsPage() {
         </select>
       </div>
 
-      <div className="filters-row">
-        <select
-          className="sort-select"
-          value={bonusFilter}
-          onChange={(e) => {
-            setBonusFilter(e.target.value as "" | "with" | "without");
-            setOffset(0);
-          }}
-        >
-          <option value="">Бонус: все</option>
-          <option value="with">С бонусом</option>
-          <option value="without">Без бонуса</option>
-        </select>
-        <select
-          className="sort-select"
-          value={roiFilter}
-          onChange={(e) => {
-            setRoiFilter(e.target.value as "" | "positive" | "negative");
-            setOffset(0);
-          }}
-        >
-          <option value="">ROI: все</option>
-          <option value="positive">ROI &gt; 0</option>
-          <option value="negative">ROI &lt; 0</option>
-        </select>
+      {/* Фильтр по рекламе */}
+      <div className="filter-tabs">
+        {(["", "with", "without"] as const).map((v) => (
+          <button
+            key={v}
+            className={`filter-tab${adsFilter === v ? " active" : ""}`}
+            onClick={() => { setAdsFilter(v); setOffset(0); }}
+          >
+            {v === ""        ? "Все"        : v === "with" ? "С рекламой" : "Без рекламы"}
+          </button>
+        ))}
       </div>
 
       <div className="list-meta">
@@ -141,9 +112,8 @@ export default function ProductsPage() {
       </div>
 
       {loading && <div className="page-loader">Загрузка...</div>}
-      {error && <div className="page-error">Ошибка: {error}</div>}
+      {error   && <div className="page-error">Ошибка: {error}</div>}
 
-      {/* Список товаров */}
       {!loading && !error && (
         <div className="product-list">
           {items.length === 0 ? (
@@ -160,7 +130,6 @@ export default function ProductsPage() {
         </div>
       )}
 
-      {/* Пагинация */}
       {totalPages > 1 && (
         <div className="pagination">
           <button
@@ -185,30 +154,28 @@ export default function ProductsPage() {
 }
 
 function ProductRow({ item, onClick }: { item: ProductItem; onClick: () => void }) {
-  const roiClass =
-    item.roi_percent == null
-      ? ""
-      : item.roi_percent >= 0
-      ? "roi-positive"
-      : "roi-negative";
-
   return (
     <div className="product-row" onClick={onClick} role="button" tabIndex={0}>
       <div className="product-row-main">
-        <div className="product-title">{item.title ?? item.sku}</div>
+        <div className="product-row-header">
+          <div className="product-title">{item.title ?? item.sku}</div>
+          {item.has_ads && <span className="ads-badge">Реклама</span>}
+        </div>
         <div className="product-sku">{item.sku}</div>
       </div>
-      <div className="product-row-metrics">
-        <span className="metric-chip">
-          {item.spend.toLocaleString("ru-KZ", { maximumFractionDigits: 0 })} ₸
-        </span>
-        <span className="metric-chip">CTR {item.avg_ctr.toFixed(1)}%</span>
-        {item.roi_percent != null && (
-          <span className={`metric-chip ${roiClass}`}>
-            ROI {item.roi_percent.toFixed(0)}%
+      {item.has_ads && (
+        <div className="product-row-metrics">
+          <span className="metric-chip">
+            {item.spend.toLocaleString("ru-KZ", { maximumFractionDigits: 0 })} ₸
           </span>
-        )}
-      </div>
+          {item.avg_ctr > 0 && (
+            <span className="metric-chip">CTR {item.avg_ctr.toFixed(1)}%</span>
+          )}
+          {item.clicks > 0 && (
+            <span className="metric-chip">{item.clicks} кликов</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

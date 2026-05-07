@@ -1,20 +1,10 @@
-
 /**
  * Dashboard — главная страница TMA.
- * Показывает сводные метрики, сигналы и мини-статистику за 7 дней.
+ * Показывает сводные метрики, сигналы и навигацию.
  */
-import { type ReactNode, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
-import {
-  AlertTriangle,
-  BadgeX,
-  ChartColumn,
-  MousePointerClick,
-  Package,
-  Trophy,
-  Wallet,
-} from "lucide-react";
+import { AlertTriangle, BadgeX } from "lucide-react";
 import type { DashboardResponse } from "../api/client";
 import { ApiError } from "../api/client";
 import { useApi } from "../hooks/useApi";
@@ -63,19 +53,15 @@ export default function DashboardPage() {
 
   const { total_stats, today, alerts } = data;
 
-  // Данные для мини-диаграммы (берём из today, если доступны)
-  const chartData = today?.total_spend != null
-    ? [{ name: "Сегодня", spend: today.total_spend ?? 0, clicks: today.total_clicks ?? 0 }]
-    : [];
+  const todaySpend = today?.total_spend ?? 0;
+  const todayClicks = today?.total_clicks ?? 0;
+  const todayCtr = typeof today?.avg_ctr === "number" ? today.avg_ctr : null;
 
   return (
     <div className="page">
-      <div className="title-row">
-        <ChartColumn className="title-icon" />
-        <h1 className="page-title">Kaspi Ads Dashboard</h1>
-      </div>
+      <h1 className="page-title">Kaspi Ads</h1>
 
-      {/* Alerts */}
+      {/* Алерты */}
       {alerts.length > 0 && (
         <div className="alerts-block">
           {alerts.map((a, i) => (
@@ -84,7 +70,9 @@ export default function DashboardPage() {
               className={`alert alert-${a.type === "wasted_budget" ? "warning" : "info"}`}
               onClick={() => navigate(a.type === "wasted_budget" ? "/wasted-budget" : "/no-bonus")}
             >
-              {a.type === "wasted_budget" ? <AlertTriangle size={14} /> : <BadgeX size={14} />}
+              {a.type === "wasted_budget"
+                ? <AlertTriangle size={14} />
+                : <BadgeX size={14} />}
               {a.message}
             </div>
           ))}
@@ -111,32 +99,31 @@ export default function DashboardPage() {
         />
       </div>
 
-      {/* Мини-диаграмма */}
-      {chartData.length > 0 && (
-        <div className="chart-block">
-          <h3 className="chart-title">Затраты сегодня</h3>
-          <ResponsiveContainer width="100%" height={100}>
-            <BarChart data={chartData}>
-              <XAxis dataKey="name" hide />
-              <YAxis hide />
-              <Tooltip formatter={(v) => [`${Number(v)} ₸`, "Затраты"]} />
-              <Bar dataKey="spend" fill="var(--tg-theme-button-color, #2196f3)" radius={4} />
-            </BarChart>
-          </ResponsiveContainer>
+      {/* Сегодня */}
+      {todaySpend > 0 && (
+        <div className="today-block">
+          <span className="today-label">Сегодня</span>
+          <div className="today-stats">
+            <span className="today-stat">{formatMoney(todaySpend)} ₸</span>
+            <span className="today-sep">·</span>
+            <span className="today-stat">{todayClicks} кликов</span>
+            {todayCtr != null && (
+              <>
+                <span className="today-sep">·</span>
+                <span className="today-stat">CTR {todayCtr.toFixed(2)}%</span>
+              </>
+            )}
+          </div>
         </div>
       )}
 
       {/* Навигация */}
       <div className="nav-links">
-        <NavItem label="Все товары" icon={<Package size={18} />} onClick={() => navigate("/products")} />
-        <NavItem label="Топ исполнители" icon={<Trophy size={18} />} onClick={() => navigate("/top-performers")} />
-        <NavItem label="Слив бюджета" icon={<Wallet size={18} />} onClick={() => navigate("/wasted-budget")} />
-        <NavItem label="Без бонусов" icon={<BadgeX size={18} />} onClick={() => navigate("/no-bonus")} />
-        <NavItem
-          label="Кликабельные"
-          icon={<MousePointerClick size={18} />}
-          onClick={() => navigate("/most-clickable")}
-        />
+        <NavItem label="Все товары" onClick={() => navigate("/products")} />
+        <NavItem label="Топ исполнители" onClick={() => navigate("/top-performers")} />
+        <NavItem label="Слив бюджета" onClick={() => navigate("/wasted-budget")} />
+        <NavItem label="Без бонусов" onClick={() => navigate("/no-bonus")} />
+        <NavItem label="Кликабельные" onClick={() => navigate("/most-clickable")} />
       </div>
 
       {/* Кнопка запуска скрапинга */}
@@ -160,18 +147,9 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
-function NavItem({
-  label,
-  icon,
-  onClick,
-}: {
-  label: string;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
+function NavItem({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button className="nav-item" onClick={onClick}>
-      <span className="nav-icon">{icon}</span>
       <span className="nav-label">{label}</span>
       <span className="nav-arrow">›</span>
     </button>

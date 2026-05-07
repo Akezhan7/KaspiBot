@@ -143,6 +143,8 @@ export interface DashboardResponse {
 export interface ProductItem {
   sku: string;
   title: string | null;
+  url?: string | null;
+  has_ads: boolean;
   spend: number;
   revenue: number;
   clicks: number;
@@ -158,8 +160,7 @@ export interface ProductsQuery {
   offset?: number;
   period?: number;
   q?: string;
-  bonus?: "with" | "without";
-  roi?: "positive" | "negative";
+  ads?: "with" | "without";
 }
 
 export interface ProductsResponse {

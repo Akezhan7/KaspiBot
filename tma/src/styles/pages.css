@@ -228,7 +228,7 @@ html, body {
 .nav-item {
   display: flex;
   align-items: center;
-  padding: var(--spacing-md);
+  padding: 13px var(--spacing-md);
   background: var(--surface-strong);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
@@ -242,20 +242,94 @@ html, body {
 
 .nav-item:active { opacity: 0.7; }
 
-.nav-icon {
-  margin-right: var(--spacing-md);
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
-  background: rgba(33, 150, 243, 0.12);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--tg-theme-link-color);
-  flex-shrink: 0;
-}
 .nav-label { flex: 1; font-weight: 500; }
 .nav-arrow { color: var(--tg-theme-hint-color); font-size: 18px; }
+
+/* ── Блок «Сегодня» ── */
+.today-block {
+  background: var(--surface-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.today-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--tg-theme-hint-color);
+  flex-shrink: 0;
+}
+
+.today-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.today-stat {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tg-theme-text-color);
+}
+
+.today-sep {
+  color: var(--tg-theme-hint-color);
+  font-size: 13px;
+}
+
+/* ── Фильтр-табы ── */
+.filter-tabs {
+  display: flex;
+  gap: var(--spacing-xs);
+  margin-bottom: var(--spacing-sm);
+}
+
+.filter-tab {
+  flex: 1;
+  padding: 7px var(--spacing-sm);
+  border: 1.5px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--tg-theme-secondary-bg-color);
+  color: var(--tg-theme-hint-color);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.filter-tab.active {
+  background: var(--tg-theme-button-color);
+  color: var(--tg-theme-button-text-color);
+  border-color: var(--tg-theme-button-color);
+}
+
+/* ── Бейдж рекламы ── */
+.ads-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #e3f2fd;
+  color: #1565c0;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Заголовок строки товара ── */
+.product-row-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  min-width: 0;
+}
 
 /* ── Кнопки ── */
 .btn {
@@ -332,7 +406,8 @@ html, body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
+  min-width: 0;
+  flex: 1;
 }
 
 .product-sku {
