@@ -99,9 +99,13 @@ class MarketingScraper:
 
     @staticmethod
     def _marketing_urls() -> list[str]:
-        """Список URL для раздела рекламных кампаний (новый + fallback)."""
+        """Список URL-ов «Мои кампании / Активные» (drill-down ищет ссылки на конкретные кампании)."""
         candidates = [
+            # Конфигурируемый URL (по умолчанию /advertising/overview?activeTab=Enabled)
             Config.KASPI_MARKETING_ADS_URL.strip(),
+            # Альтернативные пути к списку кампаний
+            "https://marketing.kaspi.kz/advertising/campaigns?activeTab=Enabled",
+            "https://marketing.kaspi.kz/advertising/campaigns/list?state=Enabled",
             _CANONICAL_MARKETING_PRODUCTS_URL,
             _LEGACY_MARKETING_URL,
         ]
@@ -123,9 +127,11 @@ class MarketingScraper:
     async def scrape_marketing(self) -> list[AdCampaignData]:
         """Собрать данные из раздела «Kaspi Marketing» (рекламные кампании).
 
-        Новый подход: заходим в каждую кампанию из списка «Мои кампании»
+        Подход: заходим в каждую кампанию из списка «Мои кампании»
         и скачиваем отчёт изнутри — там реальные названия товаров.
-        Fallback: старый метод (скролл/xlsx верхнего уровня).
+
+        Fallback на верхний уровень УДАЛЁН намеренно: верхний уровень содержит
+        названия кампаний и внутренние ID/RPT-коды, а не настоящие товары.
         """
         page: Page | None = None
         try:
@@ -135,34 +141,25 @@ class MarketingScraper:
                 await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
                 await self._random_delay()
 
-                # 1) Новый путь: drill-down в каждую кампанию → реальные товары
                 products = await self._scrape_all_campaign_drilldown(page, source="kaspi_marketing")
                 if products:
                     logger.info(
-                        "MarketingScraper: drill-down дал %d товаров из %d кампаний",
+                        "MarketingScraper: drill-down дал %d товаров из %d уникальных SKU",
                         len(products),
                         len({r.product_sku for r in products}),
                     )
                     return products
 
-                # 2) Fallback: DOM-скрапинг верхнего уровня (названия кампаний, не товаров)
-                has_content = await self._wait_for_content(page)
-                if has_content:
-                    rows_data = await self._scroll_and_collect_marketing_rows(page)
-                    if rows_data:
-                        logger.info("MarketingScraper: собрано %d строк маркетинга из DOM (fallback)", len(rows_data))
-                        return rows_data
+                logger.warning(
+                    "MarketingScraper: drill-down не нашёл кампании на %s — пробуем следующий URL",
+                    url,
+                )
 
-                # 3) Fallback: xlsx верхнего уровня
-                report_rows = await self._collect_marketing_from_report(page)
-                if report_rows:
-                    logger.info(
-                        "MarketingScraper: собрано %d строк маркетинга из xlsx-отчёта (fallback)",
-                        len(report_rows),
-                    )
-                    return report_rows
-
-            logger.error("MarketingScraper: не удалось собрать маркетинговые данные ни по одному URL")
+            logger.error(
+                "MarketingScraper: drill-down не нашёл кампании ни на одном URL. "
+                "Проверьте: 1) залогинен ли кабинет, 2) есть ли активные кампании, "
+                "3) совпадают ли селекторы со структурой DOM."
+            )
             return []
 
         except PlaywrightTimeoutError as e:
@@ -363,8 +360,14 @@ class MarketingScraper:
         seen_urls: set[str] = set()
         entries: list[dict[str, str]] = []
         base_url = page.url
-        prev_count = 0
 
+        # Дать странице полностью прогрузить динамическое содержимое
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
+            pass
+
+        empty_iters = 0
         for iteration in range(60):
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await page.wait_for_timeout(1_500)
@@ -377,63 +380,112 @@ class MarketingScraper:
                     entries.append(entry)
                     added += 1
 
-            if added == 0 and iteration > 0:
-                break
-            prev_count = len(entries)
+            if added == 0:
+                empty_iters += 1
+                # Прерываемся если уже три итерации подряд ничего не добавилось
+                if empty_iters >= 3:
+                    break
+            else:
+                empty_iters = 0
 
             if len(entries) >= _MAX_CAMPAIGN_ENTRIES:
                 break
 
-        logger.info(
-            "MarketingScraper: _collect_list_entries: собрано %d ссылок на %s",
-            len(entries), base_url,
-        )
+        if entries:
+            sample = ", ".join(e["name"][:30] for e in entries[:3])
+            logger.info(
+                "MarketingScraper: _collect_list_entries: собрано %d ссылок на %s | примеры: %s",
+                len(entries), base_url, sample,
+            )
+        else:
+            # Диагностика: счётчики DOM, чтобы понять почему ничего не нашли
+            try:
+                stats = await page.evaluate(
+                    """() => ({
+                        anchors: document.querySelectorAll('a[href]').length,
+                        rows: document.querySelectorAll('tr, [role="row"]').length,
+                        cards: document.querySelectorAll('[class*="card"], [class*="item"]').length,
+                        title: document.title,
+                        href: location.href,
+                    })"""
+                )
+                logger.warning(
+                    "MarketingScraper: _collect_list_entries: 0 ссылок на %s | "
+                    "anchors=%s, rows=%s, cards=%s, title=%r",
+                    base_url, stats.get("anchors"), stats.get("rows"),
+                    stats.get("cards"), stats.get("title"),
+                )
+            except Exception:
+                logger.warning("MarketingScraper: _collect_list_entries: 0 ссылок на %s", base_url)
         return entries
 
     async def _extract_list_entries_from_dom(
         self, page: Page, base_url: str
     ) -> list[dict[str, str]]:
-        """Извлечь ссылки и названия из DOM списка кампаний/акций."""
+        """Извлечь ссылки и названия отдельных кампаний/акций из DOM.
+
+        Стратегия: сканируем все <a href> на странице, отбираем те,
+        которые ведут на ту же страницу-родителя, но НЕ являются ею.
+        Признак ссылки на детали кампании — путь содержит ID-сегмент
+        (число, UUID, длинный хэш). Навигация в шапке/сайдбаре исключается.
+        """
         try:
             result = await page.evaluate(
                 """(baseUrl) => {
                     const entries = [];
                     const seen = new Set();
 
-                    const rows = document.querySelectorAll(
-                        'table tbody tr, ' +
-                        '[role="row"]:not([role="columnheader"]), ' +
-                        '[class*="row"]:not([class*="header"]):not([class*="Row--header"]), ' +
-                        '[class*="item"]:not([class*="header"])'
-                    );
+                    let baseObj;
+                    try { baseObj = new URL(baseUrl); } catch { return []; }
+                    const baseOrigin = baseObj.origin;
+                    const basePath = baseObj.pathname.replace(/\\/$/, '');
 
-                    rows.forEach(row => {
-                        const link = row.querySelector('a[href]');
-                        if (!link) return;
+                    // Сегменты пути базы — для отсечения совсем других разделов сайта
+                    const baseSegments = basePath.split('/').filter(Boolean);
+                    const rootSegment = baseSegments[0] || '';
 
+                    // Признак ID-сегмента: число от 3 цифр, UUID или хэш ≥ 5 символов
+                    const idSegmentRe = /^(\\d{3,}|[a-f0-9-]{8,}|[A-Za-z0-9_-]{6,})$/;
+
+                    const links = document.querySelectorAll('a[href]');
+                    links.forEach(link => {
                         const href = link.href || '';
                         if (!href || !href.startsWith('http')) return;
 
-                        // Пропускаем саму страницу-список
-                        const normBase = baseUrl.replace(/\\/$/, '');
-                        const normHref = href.replace(/\\/$/, '').split('?')[0];
-                        if (normHref === normBase) return;
-                        // Должен быть вложенным путём
-                        if (!normHref.includes(normBase.split('/').slice(3).join('/'))) return;
+                        let urlObj;
+                        try { urlObj = new URL(href); } catch { return; }
+                        if (urlObj.origin !== baseOrigin) return;
+
+                        const path = urlObj.pathname.replace(/\\/$/, '');
+                        if (path === basePath) return;
+
+                        // Должна быть в том же корневом разделе (например /advertising/* или /bonuses/*)
+                        if (rootSegment && !path.startsWith('/' + rootSegment + '/')) return;
+
+                        // Путь должен содержать ID-сегмент (отсекает /advertising/help, /advertising/settings)
+                        const segs = path.split('/').filter(Boolean);
+                        const hasId = segs.some(s => idSegmentRe.test(s));
+                        if (!hasId) return;
+
+                        // Не из навигации (header/aside/footer/menu)
+                        if (link.closest('header, nav, aside, footer, [role="navigation"], [class*="sidebar" i], [class*="menu" i], [class*="header" i], [class*="navbar" i]')) return;
 
                         if (seen.has(href)) return;
                         seen.add(href);
 
+                        // Имя из ближайшей карточки/строки
+                        const row = link.closest(
+                            'tr, [role="row"], [class*="row"], [class*="item"], [class*="card"], li'
+                        );
                         const nameEl = (
-                            row.querySelector('[class*="name"]') ||
-                            row.querySelector('[class*="title"]') ||
-                            row.querySelector('[class*="campaign"]') ||
-                            row.querySelector('td:first-child, [role="cell"]:first-child') ||
+                            (row && row.querySelector('[class*="name" i], [class*="title" i], [class*="campaign" i], [class*="promotion" i]')) ||
+                            (row && row.querySelector('td:first-child, [role="cell"]:first-child')) ||
+                            row ||
                             link
                         );
-                        const name = (nameEl.innerText || '').trim()
-                            .replace(/\\s+/g, ' ').slice(0, 200);
-                        if (!name) return;
+                        const rawName = (nameEl.innerText || nameEl.textContent || '').trim();
+                        const name = rawName.replace(/\\s+/g, ' ').slice(0, 200);
+                        if (!name || name.length < 2) return;
 
                         entries.push({ url: href, name });
                     });
