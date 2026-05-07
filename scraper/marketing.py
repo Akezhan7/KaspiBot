@@ -389,6 +389,9 @@ class MarketingScraper:
         "создать новую", "создать акцию", "создать кампанию", "новая акция",
         "новая кампания", "добавить", "редактировать", "настройки",
         "download", "export", "create", "edit",
+        "главная", "главное", "home", "назад", "back",
+        "войти", "login", "logout", "выйти",
+        "помощь", "поддержка", "help", "support",
     )
 
     @classmethod
@@ -438,43 +441,45 @@ class MarketingScraper:
             )
             return entries
 
-        # 3) Fallback: кликаем по карточкам (для SPA без `<a href>`)
-        logger.info(
-            "MarketingScraper: ссылок через href не найдено — "
-            "пробуем сбор через клики по карточкам на %s", base_url,
-        )
-        try:
-            click_entries = await self._collect_list_entries_via_clicks(page, base_url)
-        except Exception as exc:
-            logger.warning("MarketingScraper: ошибка сбора через клики: %s", exc)
-            click_entries = []
-
-        if click_entries:
-            sample = " | ".join(e["name"][:40] for e in click_entries[:3])
-            logger.info(
-                "MarketingScraper: _collect_list_entries (click): %d ссылок на %s | примеры: %s",
-                len(click_entries), base_url, sample,
-            )
-            return click_entries
-
-        # 4) Диагностика
+        # 3) Диагностика: сохраняем HTML страницы для анализа и логируем структуру
         try:
             stats = await page.evaluate(
-                """() => ({
-                    anchors: document.querySelectorAll('a[href]').length,
-                    rows: document.querySelectorAll('tr, [role="row"]').length,
-                    cards: document.querySelectorAll('[class*="card"], [class*="item"]').length,
-                    title: document.title,
-                })"""
+                """() => {
+                    let anchors = [...document.querySelectorAll('a[href]')].map(a => a.href);
+                    let rows = document.querySelectorAll('tr, [role="row"]').length;
+                    let cards = document.querySelectorAll('[class*="card"], [class*="item"]').length;
+                    return {
+                        anchors_count: anchors.length,
+                        anchors_sample: anchors.slice(0, 10),
+                        rows,
+                        cards,
+                        title: document.title,
+                    };
+                }"""
             )
+            sample_urls = stats.get("anchors_sample", [])
             logger.warning(
                 "MarketingScraper: _collect_list_entries: 0 ссылок на %s | "
-                "anchors=%s, rows=%s, cards=%s, title=%r",
-                base_url, stats.get("anchors"), stats.get("rows"),
+                "anchors=%s, rows=%s, cards=%s, title=%r | sample_hrefs=%s",
+                base_url, stats.get("anchors_count"), stats.get("rows"),
                 stats.get("cards"), stats.get("title"),
+                sample_urls[:5],
             )
         except Exception:
             logger.warning("MarketingScraper: _collect_list_entries: 0 ссылок на %s", base_url)
+
+        # Сохраняем HTML для диагностики
+        try:
+            import os
+            html_content = await page.content()
+            html_path = os.path.join("data", "debug_page.html")
+            os.makedirs("data", exist_ok=True)
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            logger.info("MarketingScraper: HTML страницы сохранён в %s", html_path)
+        except Exception as exc:
+            logger.debug("MarketingScraper: не удалось сохранить HTML: %s", exc)
+
         return []
 
     async def _scroll_to_load_all(self, page: Page) -> None:
@@ -653,47 +658,54 @@ class MarketingScraper:
                 """(baseUrl) => {
                     const entries = [];
                     const seen = new Set();
+                    const rejected = { nav: 0, origin: 0, sameBase: 0, tooShort: 0, badSeg: 0, noName: 0 };
 
                     let baseObj;
-                    try { baseObj = new URL(baseUrl); } catch { return []; }
+                    try { baseObj = new URL(baseUrl); } catch { return { entries: [], rejected, allHrefs: [] }; }
                     const baseOrigin = baseObj.origin;
                     const basePath = baseObj.pathname.replace(/\\/$/, '');
 
-                    // Сегменты пути базы — для отсечения совсем других разделов сайта
                     const baseSegments = basePath.split('/').filter(Boolean);
                     const rootSegment = baseSegments[0] || '';
 
-                    // «Плохие» конечные сегменты — служебные страницы, не детали кампании
+                    // «Плохие» конечные сегменты — служебные страницы
                     const badLastSegs = new Set([
-                        'list', 'overview', 'settings', 'help', 'faq', 'support',
+                        'overview', 'settings', 'help', 'faq', 'support',
                         'create', 'add', 'new', 'edit', 'reports', 'analytics',
                     ]);
 
-                    const links = document.querySelectorAll('a[href]');
-                    links.forEach(link => {
+                    // Явная навигация — только строгие теги, без [class*="menu"]
+                    const navSelector = 'header, nav, aside, footer, [role="navigation"], [class*="sidebar" i], [class*="navbar" i]';
+
+                    const allLinks = document.querySelectorAll('a[href]');
+                    const allHrefs = [...allLinks].slice(0, 20).map(a => a.href);
+
+                    allLinks.forEach(link => {
                         const href = link.href || '';
                         if (!href || !href.startsWith('http')) return;
 
                         let urlObj;
                         try { urlObj = new URL(href); } catch { return; }
-                        if (urlObj.origin !== baseOrigin) return;
+                        if (urlObj.origin !== baseOrigin) { rejected.origin++; return; }
 
                         const path = urlObj.pathname.replace(/\\/$/, '');
-                        if (path === basePath) return;
+                        if (path === basePath) { rejected.sameBase++; return; }
 
-                        // Должна быть в том же корневом разделе (например /advertising/* или /bonuses/*)
-                        if (rootSegment && !path.startsWith('/' + rootSegment + '/')) return;
+                        // Должна быть в том же корневом разделе
+                        if (rootSegment && !path.startsWith('/' + rootSegment + '/')) { rejected.origin++; return; }
 
-                        // Путь должен быть ДЛИННЕЕ базового (есть хотя бы 1 доп. сегмент)
+                        // Путь должен быть не короче базового (равный путь OK — отличие в query/hash)
                         const pathSegs = path.split('/').filter(Boolean);
-                        if (pathSegs.length <= baseSegments.length) return;
+                        if (pathSegs.length < baseSegments.length) { rejected.tooShort++; return; }
 
-                        // Последний сегмент не должен быть служебным словом
-                        const lastSeg = pathSegs[pathSegs.length - 1].toLowerCase();
-                        if (badLastSegs.has(lastSeg)) return;
+                        // Последний сегмент не должен быть служебным словом (только если путь длиннее базового)
+                        if (pathSegs.length > baseSegments.length) {
+                            const lastSeg = pathSegs[pathSegs.length - 1].toLowerCase();
+                            if (badLastSegs.has(lastSeg)) { rejected.badSeg++; return; }
+                        }
 
-                        // Не из навигации (header/aside/footer/menu)
-                        if (link.closest('header, nav, aside, footer, [role="navigation"], [class*="sidebar" i], [class*="menu" i], [class*="header" i], [class*="navbar" i]')) return;
+                        // Не из явной навигации
+                        if (link.closest(navSelector)) { rejected.nav++; return; }
 
                         if (seen.has(href)) return;
                         seen.add(href);
@@ -710,16 +722,28 @@ class MarketingScraper:
                         );
                         const rawName = (nameEl.innerText || nameEl.textContent || '').trim();
                         const name = rawName.replace(/\\s+/g, ' ').slice(0, 200);
-                        if (!name || name.length < 2) return;
+                        if (!name || name.length < 2) { rejected.noName++; return; }
 
                         entries.push({ url: href, name });
                     });
 
-                    return entries;
+                    return { entries, rejected, allHrefs };
                 }""",
                 base_url,
             )
-            return result or []
+            if not result:
+                return []
+            # Результат теперь объект {entries, rejected, allHrefs}
+            if isinstance(result, dict):
+                entries = result.get("entries") or []
+                rejected = result.get("rejected", {})
+                all_hrefs = result.get("allHrefs", [])
+                logger.debug(
+                    "MarketingScraper: DOM-ссылки на %s: найдено=%d, отсеяно=%s, sample_hrefs=%s",
+                    base_url, len(entries), rejected, all_hrefs[:5],
+                )
+                return entries
+            return result  # fallback: старый формат
         except Exception as exc:
             logger.debug("MarketingScraper: ошибка DOM-извлечения ссылок: %s", exc)
             return []
