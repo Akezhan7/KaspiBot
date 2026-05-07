@@ -53,9 +53,8 @@ async def _enrich_title(
     ads_db: "AdsDataDB",
     default: str | None = None,
 ) -> str:
-    """Получить название товара: из products.title или fallback на ads_data.raw_data.product_name."""
+    """Получить название товара: products.title → ads_data.product_name → sku."""
     product = await products_db.get_product(sku)
-    title = None
 
     if product:
         title = clean_product_title(product.get("title"))
@@ -63,14 +62,20 @@ async def _enrich_title(
             return title
 
     latest = await ads_db.get_latest_by_sku(sku)
-    if latest and latest.get("raw_data"):
-        try:
-            raw = json.loads(latest["raw_data"])
-            title = clean_product_title(raw.get("product_name"))
-            if title:
-                return title
-        except Exception:
-            pass
+    if latest:
+        # Сначала новая колонка product_name (заполняется с v5 миграции)
+        title = clean_product_title(latest.get("product_name"))
+        if title:
+            return title
+        # Fallback на raw_data JSON для старых записей
+        if latest.get("raw_data"):
+            try:
+                raw = json.loads(latest["raw_data"])
+                title = clean_product_title(raw.get("product_name"))
+                if title:
+                    return title
+            except Exception:
+                pass
 
     return default if default is not None else sku
 
@@ -205,7 +210,8 @@ async def _handle_products_list(request: web.Request) -> web.Response:
         for row in summaries:
             spend = _safe_float(row["total_spend"])
             revenue = _safe_float(row["total_revenue"])
-            roi_percent = (revenue - spend) / spend * 100.0 if spend > 0 else None
+            # roi_percent = None когда нет данных о выручке (revenue всегда 0 из Kaspi Marketing)
+            roi_percent = (revenue - spend) / spend * 100.0 if spend > 0 and revenue > 0 else None
             items.append({
                 "sku": row["product_sku"],
                 "title": None,           # будет заполнено для текущей страницы
@@ -272,8 +278,12 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
 
     try:
         product = await products_db.get_product(sku)
+
+        # Не возвращаем 404 если товар есть в ads_data — карточка всё равно полезна
         if product is None:
-            return web.json_response({"error": "Product not found"}, status=404)
+            latest_check = await ads_db.get_latest_by_sku(sku)
+            if latest_check is None:
+                return web.json_response({"error": "Product not found"}, status=404)
 
         roi_data = await processor.calculate_roi(sku, period_days=period)
         roas = await processor.calculate_roas(sku, period_days=period)
@@ -293,10 +303,13 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
             latest_data["bonus_percent"] = latest_bonus.get("bonus_percent", 0.0)
             latest_data["bonus_scraped_at"] = latest_bonus.get("scraped_at")
 
+        title = product.get("title") if product else await _enrich_title(sku, products_db, ads_db)
+        url = product.get("url") if product else None
+
         return web.json_response({
             "sku": sku,
-            "title": product.get("title"),
-            "url": product.get("url"),
+            "title": title,
+            "url": url,
             "roi": roi_data,
             "roas": roas,
             "cpc_efficiency": cpc_eff,
@@ -343,6 +356,7 @@ async def _handle_top_performers(request: web.Request) -> web.Response:
     deps = request.app[_DEPS_KEY]
     processor: "AdsAnalyticsProcessor" = deps["processor"]
     products_db: "ProductsDB" = deps["products_db"]
+    ads_db: "AdsDataDB" = deps["ads_db"]
 
     limit = _parse_int_param(request, "limit", 20, 1, _MAX_PAGE_LIMIT)
 

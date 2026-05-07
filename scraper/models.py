@@ -28,6 +28,7 @@ class AdCampaignData:
         """Конвертация в словарь для AdsDataDB.save_campaign."""
         return {
             "product_sku": self.product_sku,
+            "product_name": self.product_name,
             "scraped_at": scraped_at,
             "period_start": self.period_start.isoformat() if self.period_start else None,
             "period_end": self.period_end.isoformat() if self.period_end else None,
@@ -59,6 +60,7 @@ class BonusData:
         """Конвертация в словарь для AdsDataDB.save_campaign."""
         return {
             "product_sku": self.product_sku,
+            "product_name": self.product_name,
             "scraped_at": scraped_at,
             "period_start": None,
             "period_end": None,

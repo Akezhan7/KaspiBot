@@ -215,3 +215,46 @@ class ProductsDB:
         except Exception as e:
             logger.error(f"Ошибка поиска товаров по запросу '{query}': {e}")
             raise
+
+    async def sync_from_db(self, source_db_path: str) -> int:
+        """Скопировать товары из другой БД (например, серверной) если текущая пуста.
+
+        Выполняет INSERT OR IGNORE — не перезаписывает существующие записи.
+        Возвращает количество скопированных строк.
+        """
+        from pathlib import Path as _Path
+        if not _Path(source_db_path).exists():
+            logger.warning("sync_from_db: исходная БД не найдена: %s", source_db_path)
+            return 0
+
+        count = await self.get_products_count()
+        if count > 0:
+            logger.debug("sync_from_db: таблица products не пуста (%d записей), пропускаем", count)
+            return 0
+
+        try:
+            import sqlite3 as _sqlite3
+            with _sqlite3.connect(source_db_path) as src:
+                rows = src.execute(
+                    "SELECT master_sku, url, title, added_at, last_checked FROM products"
+                ).fetchall()
+
+            if not rows:
+                return 0
+
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.executemany(
+                    """
+                    INSERT OR IGNORE INTO products
+                        (master_sku, url, title, added_at, last_checked)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                await db.commit()
+
+            logger.info("sync_from_db: скопировано %d товаров из %s", len(rows), source_db_path)
+            return len(rows)
+        except Exception as exc:
+            logger.error("sync_from_db: ошибка: %s", exc)
+            return 0

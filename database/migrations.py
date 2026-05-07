@@ -161,6 +161,33 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             """,
         ],
     ),
+    (
+        5,
+        "ads_data: product_name column, dedup old rows, unique index per (sku, day, source)",
+        [
+            # Добавляем колонку product_name для хранения названия товара без JSON
+            "ALTER TABLE ads_data ADD COLUMN product_name TEXT",
+            # Бэкфилл: перенести product_name из raw_data JSON
+            """
+            UPDATE ads_data
+               SET product_name = json_extract(raw_data, '$.product_name')
+             WHERE product_name IS NULL
+               AND raw_data IS NOT NULL
+               AND json_extract(raw_data, '$.product_name') IS NOT NULL
+            """,
+            # Дедупликация: оставить только последнюю строку за каждый (sku, день, source)
+            """
+            DELETE FROM ads_data
+             WHERE id NOT IN (
+                 SELECT MAX(id)
+                   FROM ads_data
+                  GROUP BY product_sku, date(scraped_at), source
+             )
+            """,
+            # Уникальный индекс — теперь без конфликтов после дедупликации
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_ads_data_sku_date_source ON ads_data(product_sku, date(scraped_at), source)",
+        ],
+    ),
 ]
 
 

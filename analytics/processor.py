@@ -30,20 +30,24 @@ async def _resolve_title(
     products_db: "ProductsDB",
     ads_db: "AdsDataDB",
 ) -> str:
-    """Получить название товара из products.title или fallback на ads_data.raw_data.product_name."""
+    """Получить название товара: products.title → ads_data.product_name → sku."""
     product = await products_db.get_product(sku)
     if product and clean_product_title(product.get("title")):
         return product["title"]
 
     latest = await ads_db.get_latest_by_sku(sku)
-    if latest and latest.get("raw_data"):
-        try:
-            raw = json.loads(latest["raw_data"])
-            name = clean_product_title(raw.get("product_name"))
-            if name:
-                return name
-        except Exception:
-            pass
+    if latest:
+        name = clean_product_title(latest.get("product_name"))
+        if name:
+            return name
+        if latest.get("raw_data"):
+            try:
+                raw = json.loads(latest["raw_data"])
+                name = clean_product_title(raw.get("product_name"))
+                if name:
+                    return name
+            except Exception:
+                pass
 
     return sku
 
@@ -181,6 +185,10 @@ class AdsAnalyticsProcessor:
             if spend < _MIN_SPEND_THRESHOLD:
                 continue
 
+            # Без данных о выручке ROI не рассчитать — не включаем в "слив бюджета"
+            if revenue <= 0:
+                continue
+
             roi_percent = (revenue - spend) / spend * 100.0
             if roi_percent < threshold_roi:
                 wasted.append(
@@ -234,18 +242,25 @@ class AdsAnalyticsProcessor:
     async def get_no_bonus_products(self) -> list[dict]:
         """Товары без активных бонусов из последнего скрапинга.
 
-        Обогащает SKU-список названиями из таблицы products.
-        Returns список dict: sku, title.
+        Обогащает SKU-список названиями и маркетинговыми метриками.
+        Returns список dict: sku, title, total_impressions, total_clicks, total_spend.
         """
         raw = await self._ads_db.get_products_without_bonuses()
         result: list[dict] = []
 
         for item in raw:
             title = await _resolve_title(item["product_sku"], self._products_db, self._ads_db)
+            marketing_rows = await self._ads_db.get_spend_revenue_summary(
+                period_days=30, sku=item["product_sku"]
+            )
+            marketing = marketing_rows[0] if marketing_rows else {}
             result.append(
                 {
                     "sku": item["product_sku"],
                     "title": title,
+                    "total_impressions": int(marketing.get("total_impressions") or 0) or None,
+                    "total_clicks": int(marketing.get("total_clicks") or 0) or None,
+                    "total_spend": round(float(marketing.get("total_spend") or 0), 2) or None,
                 }
             )
 

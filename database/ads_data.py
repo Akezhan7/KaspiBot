@@ -22,74 +22,50 @@ class AdsDataDB:
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
 
+    _INSERT_SQL = """
+        INSERT OR REPLACE INTO ads_data
+            (product_sku, product_name, scraped_at, period_start, period_end, source,
+             impressions, clicks, ctr, spend, cpc,
+             orders, revenue, bonus_active, bonus_percent, raw_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    @staticmethod
+    def _row_tuple(d: dict) -> tuple:
+        return (
+            d["product_sku"],
+            d.get("product_name") or None,
+            d.get("scraped_at", now_kz_str()),
+            d.get("period_start"),
+            d.get("period_end"),
+            d.get("source", "kaspi_marketing"),
+            d.get("impressions", 0),
+            d.get("clicks", 0),
+            d.get("ctr", 0),
+            d.get("spend", 0),
+            d.get("cpc", 0),
+            d.get("orders", 0),
+            d.get("revenue", 0),
+            d.get("bonus_active", 0),
+            d.get("bonus_percent", 0),
+            json.dumps(d.get("raw_data")) if d.get("raw_data") else None,
+        )
+
     async def save_campaign(self, data: dict) -> int:
-        """Сохранить одну запись рекламной кампании. Возвращает id."""
+        """Сохранить одну запись рекламной кампании (UPSERT по дню). Возвращает id."""
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                """
-                INSERT INTO ads_data
-                    (product_sku, scraped_at, period_start, period_end, source,
-                     impressions, clicks, ctr, spend, cpc,
-                     orders, revenue, bonus_active, bonus_percent, raw_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    data["product_sku"],
-                    data.get("scraped_at", now_kz_str()),
-                    data.get("period_start"),
-                    data.get("period_end"),
-                    data.get("source", "kaspi_marketing"),
-                    data.get("impressions", 0),
-                    data.get("clicks", 0),
-                    data.get("ctr", 0),
-                    data.get("spend", 0),
-                    data.get("cpc", 0),
-                    data.get("orders", 0),
-                    data.get("revenue", 0),
-                    data.get("bonus_active", 0),
-                    data.get("bonus_percent", 0),
-                    json.dumps(data.get("raw_data")) if data.get("raw_data") else None,
-                ),
-            )
+            cursor = await db.execute(self._INSERT_SQL, self._row_tuple(data))
             await db.commit()
             return cursor.lastrowid
 
     async def save_campaigns_batch(self, items: list[dict]) -> int:
-        """Сохранить пакет записей. Возвращает количество вставленных."""
+        """Сохранить пакет записей (UPSERT по дню). Возвращает количество сохранённых."""
         if not items:
             return 0
         async with aiosqlite.connect(self.db_path) as db:
-            await db.executemany(
-                """
-                INSERT INTO ads_data
-                    (product_sku, scraped_at, period_start, period_end, source,
-                     impressions, clicks, ctr, spend, cpc,
-                     orders, revenue, bonus_active, bonus_percent, raw_data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        d["product_sku"],
-                        d.get("scraped_at", now_kz_str()),
-                        d.get("period_start"),
-                        d.get("period_end"),
-                        d.get("source", "kaspi_marketing"),
-                        d.get("impressions", 0),
-                        d.get("clicks", 0),
-                        d.get("ctr", 0),
-                        d.get("spend", 0),
-                        d.get("cpc", 0),
-                        d.get("orders", 0),
-                        d.get("revenue", 0),
-                        d.get("bonus_active", 0),
-                        d.get("bonus_percent", 0),
-                        json.dumps(d.get("raw_data")) if d.get("raw_data") else None,
-                    )
-                    for d in items
-                ],
-            )
+            await db.executemany(self._INSERT_SQL, [self._row_tuple(d) for d in items])
             await db.commit()
-            return len(items)
+        return len(items)
 
     async def get_latest_by_sku(self, sku: str, source: str | None = None) -> dict | None:
         """Последняя запись для данного SKU.
@@ -132,19 +108,28 @@ class AdsDataDB:
                 return [dict(row) async for row in cursor]
 
     async def get_top_spenders(self, limit: int = 20) -> list[dict]:
-        """Топ SKU по суммарным затратам за последние 30 дней."""
+        """Топ SKU по суммарным затратам за последние 30 дней (без дублей по дням)."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
+                WITH deduped AS (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY product_sku, date(scraped_at), source
+                               ORDER BY id DESC
+                           ) AS rn
+                    FROM ads_data
+                    WHERE scraped_at >= datetime('now', '-30 days')
+                )
                 SELECT product_sku,
                        SUM(spend) AS total_spend,
                        SUM(clicks) AS total_clicks,
                        SUM(impressions) AS total_impressions,
                        AVG(ctr) AS avg_ctr,
                        AVG(cpc) AS avg_cpc
-                FROM ads_data
-                WHERE scraped_at >= datetime('now', '-30 days')
+                FROM deduped
+                WHERE rn = 1
                 GROUP BY product_sku
                 ORDER BY total_spend DESC
                 LIMIT ?
@@ -184,19 +169,28 @@ class AdsDataDB:
                 return [dict(row) async for row in cursor]
 
     async def get_most_clickable(self, limit: int = 20) -> list[dict]:
-        """Топ SKU по CTR за последние 30 дней."""
+        """Топ SKU по CTR за последние 30 дней (без дублей по дням)."""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
+                WITH deduped AS (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY product_sku, date(scraped_at), source
+                               ORDER BY id DESC
+                           ) AS rn
+                    FROM ads_data
+                    WHERE scraped_at >= datetime('now', '-30 days')
+                      AND impressions > 0
+                )
                 SELECT product_sku,
                        AVG(ctr) AS avg_ctr,
                        SUM(clicks) AS total_clicks,
                        SUM(impressions) AS total_impressions,
                        SUM(spend) AS total_spend
-                FROM ads_data
-                WHERE scraped_at >= datetime('now', '-30 days')
-                  AND impressions > 0
+                FROM deduped
+                WHERE rn = 1
                 GROUP BY product_sku
                 ORDER BY avg_ctr DESC
                 LIMIT ?
@@ -245,7 +239,25 @@ class AdsDataDB:
         Возвращает: product_sku, total_spend, total_revenue, total_clicks,
                     total_impressions, total_orders, avg_ctr, avg_cpc
         """
-        query = """
+        sku_filter = "AND product_sku = ?" if sku else ""
+        params: list[Any] = [f"-{period_days}"]
+        if sku:
+            params.append(sku)
+
+        # Дедупликация: берём только последнюю строку за каждый (sku, день) чтобы исключить
+        # задвоение при повторных запусках скрапера в один день.
+        query = f"""
+            WITH deduped AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY product_sku, date(scraped_at)
+                           ORDER BY id DESC
+                       ) AS rn
+                FROM ads_data
+                WHERE source = 'kaspi_marketing'
+                  AND scraped_at >= datetime('now', ? || ' days')
+                  {sku_filter}
+            )
             SELECT product_sku,
                    SUM(spend)       AS total_spend,
                    SUM(revenue)     AS total_revenue,
@@ -254,15 +266,11 @@ class AdsDataDB:
                    SUM(orders)      AS total_orders,
                    AVG(ctr)         AS avg_ctr,
                    AVG(cpc)         AS avg_cpc
-            FROM ads_data
-            WHERE source = 'kaspi_marketing'
-              AND scraped_at >= datetime('now', ? || ' days')
+            FROM deduped
+            WHERE rn = 1
+            GROUP BY product_sku
+            ORDER BY total_spend DESC
         """
-        params: list[Any] = [f"-{period_days}"]
-        if sku:
-            query += " AND product_sku = ?"
-            params.append(sku)
-        query += " GROUP BY product_sku ORDER BY total_spend DESC"
 
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -270,7 +278,7 @@ class AdsDataDB:
                 return [dict(row) async for row in cursor]
 
     async def get_daily_totals(self, start_date: str, end_date: str) -> list[dict]:
-        """Суммарные метрики по всем SKU, сгруппированные по дням.
+        """Суммарные метрики по всем SKU, сгруппированные по дням (без дублей).
 
         Используется агрегатором для дневных/недельных/месячных сводок.
         Возвращает: day (YYYY-MM-DD), total_spend, total_revenue, total_clicks,
@@ -280,6 +288,16 @@ class AdsDataDB:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
+                WITH deduped AS (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY product_sku, date(scraped_at)
+                               ORDER BY id DESC
+                           ) AS rn
+                    FROM ads_data
+                    WHERE source = 'kaspi_marketing'
+                      AND scraped_at BETWEEN ? AND ?
+                )
                 SELECT date(scraped_at)   AS day,
                        SUM(spend)         AS total_spend,
                        SUM(revenue)       AS total_revenue,
@@ -289,9 +307,8 @@ class AdsDataDB:
                        AVG(ctr)           AS avg_ctr,
                        AVG(cpc)           AS avg_cpc,
                        COUNT(DISTINCT product_sku) AS products_count
-                FROM ads_data
-                WHERE source = 'kaspi_marketing'
-                  AND scraped_at BETWEEN ? AND ?
+                FROM deduped
+                WHERE rn = 1
                 GROUP BY date(scraped_at)
                 ORDER BY day ASC
                 """,
@@ -300,7 +317,7 @@ class AdsDataDB:
                 return [dict(row) async for row in cursor]
 
     async def get_trends_by_sku(self, sku: str, days: int = 30) -> list[dict]:
-        """Дневной тренд метрик для конкретного SKU.
+        """Дневной тренд метрик для конкретного SKU (без дублей).
 
         Возвращает: day, spend, revenue, clicks, impressions, ctr, cpc
         """
@@ -308,6 +325,17 @@ class AdsDataDB:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
+                WITH deduped AS (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY product_sku, date(scraped_at)
+                               ORDER BY id DESC
+                           ) AS rn
+                    FROM ads_data
+                    WHERE product_sku = ?
+                      AND source = 'kaspi_marketing'
+                      AND scraped_at >= datetime('now', ? || ' days')
+                )
                 SELECT date(scraped_at)   AS day,
                        SUM(spend)         AS spend,
                        SUM(revenue)       AS revenue,
@@ -315,10 +343,8 @@ class AdsDataDB:
                        SUM(impressions)   AS impressions,
                        AVG(ctr)           AS ctr,
                        AVG(cpc)           AS cpc
-                FROM ads_data
-                WHERE product_sku = ?
-                  AND source = 'kaspi_marketing'
-                  AND scraped_at >= datetime('now', ? || ' days')
+                FROM deduped
+                WHERE rn = 1
                 GROUP BY date(scraped_at)
                 ORDER BY day ASC
                 """,
