@@ -559,7 +559,21 @@ def _register_tma_static(app: web.Application, dist_path: Path) -> None:
                 status=503,
                 content_type="text/plain",
             )
-        return web.FileResponse(index_html)
+        # Читаем файл напрямую чтобы принудительно отключить браузерный кеш.
+        # FileResponse выставляет ETag и возвращает 304 при повторных запросах —
+        # это ломает TMA после каждого обновления сборки (новые хешированные имена JS/CSS).
+        # Хешированные ассеты (index-abc123.js) можно кешировать — они меняются вместе с именем.
+        content = index_html.read_bytes()
+        return web.Response(
+            body=content,
+            content_type="text/html",
+            charset="utf-8",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
     app.router.add_get("/tma", _serve_index)
     app.router.add_get("/tma/", _serve_index)
