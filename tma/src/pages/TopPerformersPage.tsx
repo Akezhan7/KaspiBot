@@ -3,7 +3,6 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Trophy } from "lucide-react";
 import type { AdsItem } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
@@ -35,10 +34,7 @@ export default function TopPerformersPage() {
 
   return (
     <div className="page">
-      <div className="title-row">
-        <Trophy className="title-icon" />
-        <h1 className="page-title">Топ исполнители</h1>
-      </div>
+      <h1 className="page-title">Топ исполнители</h1>
       <p className="page-subtitle">Лучший ROAS (выручка / затраты)</p>
 
       {items.length === 0 ? (

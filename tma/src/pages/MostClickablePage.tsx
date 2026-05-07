@@ -3,7 +3,6 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { MousePointerClick } from "lucide-react";
 import type { AdsItem } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
@@ -35,10 +34,7 @@ export default function MostClickablePage() {
 
   return (
     <div className="page">
-      <div className="title-row">
-        <MousePointerClick className="title-icon" />
-        <h1 className="page-title">Кликабельные</h1>
-      </div>
+      <h1 className="page-title">Кликабельные</h1>
       <p className="page-subtitle">Топ товаров по CTR</p>
 
       {items.length === 0 ? (

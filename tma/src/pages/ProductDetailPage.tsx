@@ -4,7 +4,7 @@
  */
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Activity, CircleX, Gift } from "lucide-react";
+import { CircleX, Gift } from "lucide-react";
 import {
   LineChart,
   Line,
@@ -66,10 +66,7 @@ export default function ProductDetailPage() {
 
   return (
     <div className="page">
-      <div className="title-row">
-        <Activity className="title-icon" />
-        <h1 className="page-title">{data.title ?? data.sku}</h1>
-      </div>
+      <h1 className="page-title">{data.title ?? data.sku}</h1>
       <div className="sku-label">{data.sku}</div>
 
       {/* Основные метрики */}
