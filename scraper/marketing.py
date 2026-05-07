@@ -478,19 +478,41 @@ class MarketingScraper:
         return []
 
     async def _scroll_to_load_all(self, page: Page) -> None:
-        """Скроллит страницу до конца, чтобы виртуализированный список подгрузил все элементы."""
+        """Скроллит страницу до конца, загружая все элементы виртуализированного списка.
+
+        Два критерия остановки:
+        1. Высота страницы перестала расти (обычные списки с пагинацией)
+        2. Количество кликабельных элементов перестало расти (виртуализированные списки,
+           где высота постоянна, но новые элементы подгружаются по мере скролла)
+        """
+        count_js = """() => document.querySelectorAll(
+            '[class*="card" i]:not([class*="header" i]):not([class*="footer" i]):not([class*="skeleton" i]):not([class*="placeholder" i]), ' +
+            '[class*="item" i]:not([class*="header" i]):not([class*="footer" i]):not([class*="skeleton" i]):not([class*="menu-item" i]):not([class*="nav" i]):not([class*="placeholder" i]), ' +
+            'tbody tr:not([class*="header" i]), ' +
+            '[role="row"]:not([role="columnheader"])'
+        ).length"""
+
         prev_height = 0
-        for _ in range(60):
+        prev_count = 0
+        stable_iters = 0
+        for _ in range(80):
             try:
                 height = await page.evaluate("document.body.scrollHeight")
+                count = await page.evaluate(count_js)
             except Exception:
                 break
-            if height == prev_height:
-                # Достигли конца
-                break
+
+            if height == prev_height and count == prev_count:
+                stable_iters += 1
+                if stable_iters >= 3:
+                    break
+            else:
+                stable_iters = 0
+
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1_500)
+            await page.wait_for_timeout(1_200)
             prev_height = height
+            prev_count = count
 
     async def _collect_list_entries_via_clicks(
         self, page: Page, list_url: str
@@ -500,26 +522,31 @@ class MarketingScraper:
         Используется когда карточки кампаний — это `<div onClick=...>` без `<a href>`.
         Результат: список {url, name}.
         """
-        # Селектор кликабельных строк/карточек — широкий
-        # Берём только те, у которых есть текст и которые НЕ в навигации
-        click_index_js = """() => {
+        # Общий JS-селектор для карточек кампаний (используется и для индексации и для клика)
+        _CARD_SELECTOR = (
+            '[class*="card" i]:not([class*="header" i]):not([class*="footer" i])'
+            ':not([class*="skeleton" i]):not([class*="placeholder" i]), '
+            '[class*="item" i]:not([class*="header" i]):not([class*="footer" i])'
+            ':not([class*="skeleton" i]):not([class*="menu-item" i]):not([class*="nav" i])'
+            ':not([class*="placeholder" i]), '
+            'tbody tr:not([class*="header" i]), '
+            '[role="row"]:not([role="columnheader"])'
+        )
+
+        click_index_js = f"""() => {{
+            const sel = `{_CARD_SELECTOR}`;
             const out = [];
-            const candidates = document.querySelectorAll(
-                '[class*="card" i]:not([class*="header" i]):not([class*="footer" i]), ' +
-                'tbody tr:not([class*="header" i]), ' +
-                '[role="row"]:not([role="columnheader"])'
-            );
-            candidates.forEach((el, idx) => {
+            const candidates = document.querySelectorAll(sel);
+            candidates.forEach((el, idx) => {{
                 if (el.closest('header, nav, aside, footer, [role="navigation"]')) return;
                 const text = (el.innerText || '').trim();
                 if (!text || text.length < 2) return;
-                // Только видимые
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) return;
-                out.push({ idx, name: text.split('\\n')[0].slice(0, 200) });
-            });
+                // Пропускаем элементы явно скрытые (display:none)
+                if (window.getComputedStyle(el).display === 'none') return;
+                out.push({{ idx, name: text.split('\\n')[0].slice(0, 200) }});
+            }});
             return out;
-        }"""
+        }}"""
 
         candidates: list[dict] = await page.evaluate(click_index_js) or []
         # Отсев кнопок «Скачать отчёт» и пр.
@@ -534,29 +561,26 @@ class MarketingScraper:
         results: list[dict[str, str]] = []
         seen_urls: set[str] = set()
 
-        # Берём селектор для поиска карточек по индексу. Должен совпадать с порядком в JS.
-        click_and_scroll_js = """(targetIdx) => {
-            const candidates = document.querySelectorAll(
-                '[class*="card" i]:not([class*="header" i]):not([class*="footer" i]), ' +
-                'tbody tr:not([class*="header" i]), ' +
-                '[role="row"]:not([role="columnheader"])'
-            );
+        # click_and_scroll_js должен использовать тот же порядок элементов что и click_index_js
+        click_and_scroll_js = f"""(targetIdx) => {{
+            const sel = `{_CARD_SELECTOR}`;
+            const candidates = document.querySelectorAll(sel);
             let visibleIdx = 0;
-            for (const el of candidates) {
+            for (const el of candidates) {{
                 if (el.closest('header, nav, aside, footer, [role="navigation"]')) continue;
                 const text = (el.innerText || '').trim();
                 if (!text || text.length < 2) continue;
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
-                if (visibleIdx === targetIdx) {
-                    el.scrollIntoView({ block: 'center' });
-                    el.click();
+                if (window.getComputedStyle(el).display === 'none') continue;
+                if (visibleIdx === targetIdx) {{
+                    el.scrollIntoView({{ block: 'center' }});
+                    // Небольшая пауза после скролла чтобы элемент попал во viewport
+                    setTimeout(() => el.click(), 50);
                     return true;
-                }
+                }}
                 visibleIdx++;
-            }
+            }}
             return false;
-        }"""
+        }}"""
 
         async def click_card(idx: int) -> str | None:
             """Клик по idx-й карточке + ожидание смены URL (для SPA с pushState)."""
@@ -568,6 +592,8 @@ class MarketingScraper:
                 return None
             if not clicked:
                 return None
+            # Пауза для setTimeout(50ms) внутри JS
+            await page.wait_for_timeout(150)
 
             # SPA с React Router использует pushState — обычный navigation event не работает.
             # Ждём пока URL не сменится.
@@ -637,8 +663,11 @@ class MarketingScraper:
                     const baseSegments = basePath.split('/').filter(Boolean);
                     const rootSegment = baseSegments[0] || '';
 
-                    // Признак ID-сегмента: число от 3 цифр, UUID или хэш ≥ 5 символов
-                    const idSegmentRe = /^(\\d{3,}|[a-f0-9-]{8,}|[A-Za-z0-9_-]{6,})$/;
+                    // «Плохие» конечные сегменты — служебные страницы, не детали кампании
+                    const badLastSegs = new Set([
+                        'list', 'overview', 'settings', 'help', 'faq', 'support',
+                        'create', 'add', 'new', 'edit', 'reports', 'analytics',
+                    ]);
 
                     const links = document.querySelectorAll('a[href]');
                     links.forEach(link => {
@@ -655,10 +684,13 @@ class MarketingScraper:
                         // Должна быть в том же корневом разделе (например /advertising/* или /bonuses/*)
                         if (rootSegment && !path.startsWith('/' + rootSegment + '/')) return;
 
-                        // Путь должен содержать ID-сегмент (отсекает /advertising/help, /advertising/settings)
-                        const segs = path.split('/').filter(Boolean);
-                        const hasId = segs.some(s => idSegmentRe.test(s));
-                        if (!hasId) return;
+                        // Путь должен быть ДЛИННЕЕ базового (есть хотя бы 1 доп. сегмент)
+                        const pathSegs = path.split('/').filter(Boolean);
+                        if (pathSegs.length <= baseSegments.length) return;
+
+                        // Последний сегмент не должен быть служебным словом
+                        const lastSeg = pathSegs[pathSegs.length - 1].toLowerCase();
+                        if (badLastSegs.has(lastSeg)) return;
 
                         // Не из навигации (header/aside/footer/menu)
                         if (link.closest('header, nav, aside, footer, [role="navigation"], [class*="sidebar" i], [class*="menu" i], [class*="header" i], [class*="navbar" i]')) return;
