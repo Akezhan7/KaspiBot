@@ -26,6 +26,11 @@ class AdCampaignData:
 
     def to_dao_dict(self, scraped_at: str) -> dict:
         """Конвертация в словарь для AdsDataDB.save_campaign."""
+        raw: dict = {"product_name": self.product_name}
+        # campaign_name может быть выставлен скрапером после создания объекта
+        campaign_name = getattr(self, "_campaign_name", "")
+        if campaign_name:
+            raw["campaign_name"] = campaign_name
         return {
             "product_sku": self.product_sku,
             "product_name": self.product_name,
@@ -42,7 +47,7 @@ class AdCampaignData:
             "revenue": 0.0,
             "bonus_active": 0,
             "bonus_percent": 0.0,
-            "raw_data": {"product_name": self.product_name},
+            "raw_data": raw,
         }
 
 

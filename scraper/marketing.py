@@ -44,6 +44,10 @@ _SCROLL_PAUSE_MS = 1_500
 # Максимум итераций скролла — защита от бесконечного цикла
 _MAX_SCROLL_ITERATIONS = 500
 
+# Drill-down: максимум кампаний/акций за один сеанс и задержка между ними
+_MAX_CAMPAIGN_ENTRIES = 300
+_CAMPAIGN_NAV_DELAY_MS = 2_000
+
 _XLSX_NS = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
 # Поддерживаем старый и новый формат URL отчёта (включая /api/v1/merchant/<id>/...)
@@ -119,8 +123,9 @@ class MarketingScraper:
     async def scrape_marketing(self) -> list[AdCampaignData]:
         """Собрать данные из раздела «Kaspi Marketing» (рекламные кампании).
 
-        Обрабатывает бесконечный скролл, загружает все строки таблицы.
-        Returns list of AdCampaignData for each product found.
+        Новый подход: заходим в каждую кампанию из списка «Мои кампании»
+        и скачиваем отчёт изнутри — там реальные названия товаров.
+        Fallback: старый метод (скролл/xlsx верхнего уровня).
         """
         page: Page | None = None
         try:
@@ -130,19 +135,29 @@ class MarketingScraper:
                 await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
                 await self._random_delay()
 
-                # 1) Сначала пробуем DOM-скрапинг (быстрее и точнее, если таблица доступна).
+                # 1) Новый путь: drill-down в каждую кампанию → реальные товары
+                products = await self._scrape_all_campaign_drilldown(page, source="kaspi_marketing")
+                if products:
+                    logger.info(
+                        "MarketingScraper: drill-down дал %d товаров из %d кампаний",
+                        len(products),
+                        len({r.product_sku for r in products}),
+                    )
+                    return products
+
+                # 2) Fallback: DOM-скрапинг верхнего уровня (названия кампаний, не товаров)
                 has_content = await self._wait_for_content(page)
                 if has_content:
                     rows_data = await self._scroll_and_collect_marketing_rows(page)
                     if rows_data:
-                        logger.info("MarketingScraper: собрано %d строк маркетинга из DOM", len(rows_data))
+                        logger.info("MarketingScraper: собрано %d строк маркетинга из DOM (fallback)", len(rows_data))
                         return rows_data
 
-                # 2) Если DOM-таблица недоступна — fallback на xlsx-отчёт.
+                # 3) Fallback: xlsx верхнего уровня
                 report_rows = await self._collect_marketing_from_report(page)
                 if report_rows:
                     logger.info(
-                        "MarketingScraper: собрано %d строк маркетинга из xlsx-отчёта",
+                        "MarketingScraper: собрано %d строк маркетинга из xlsx-отчёта (fallback)",
                         len(report_rows),
                     )
                     return report_rows
@@ -163,12 +178,15 @@ class MarketingScraper:
     async def scrape_bonuses(self) -> list[BonusData]:
         """Собрать данные из раздела «Бонусы».
 
-        Returns list of BonusData для каждого товара.
+        Новый подход: заходим в каждую акцию из «Мои акции» и скачиваем
+        отчёт изнутри — там реальные товары с процентами бонусов.
+        Fallback: старый метод (скролл/xlsx верхнего уровня).
         """
         page: Page | None = None
         try:
             page = await self._context.new_page()
             collected: list[BonusData] = []
+
             for url in self._bonus_urls():
                 if collected and url in _LEGACY_BONUS_URLS:
                     logger.info(
@@ -181,37 +199,45 @@ class MarketingScraper:
                 await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
                 await self._random_delay()
 
+                # 1) Drill-down в каждую акцию → реальные товары
+                drill_rows = await self._scrape_all_bonus_drilldown(page)
+                if drill_rows:
+                    logger.info(
+                        "MarketingScraper: drill-down дал %d бонусных товаров с %s",
+                        len(drill_rows), url,
+                    )
+                    collected.extend(drill_rows)
+                    continue
+
+                # 2) Fallback: DOM верхнего уровня
                 has_content = await self._wait_for_content(page)
                 dom_rows: list[BonusData] = []
                 if has_content:
                     dom_rows = await self._scroll_and_collect_bonus_rows(page)
                     logger.info(
-                        "MarketingScraper: бонусный URL %s дал %d строк из DOM",
-                        url,
-                        len(dom_rows),
+                        "MarketingScraper: бонусный URL %s дал %d строк из DOM (fallback)",
+                        url, len(dom_rows),
                     )
                     collected.extend(dom_rows)
                 else:
                     logger.warning(
-                        "MarketingScraper: URL бонусов без DOM-контента, пробуем отчёт: %s",
-                        url,
+                        "MarketingScraper: URL бонусов без DOM-контента, пробуем отчёт: %s", url,
                     )
 
                 if dom_rows:
                     continue
 
+                # 3) Fallback: xlsx верхнего уровня
                 report_rows = await self._collect_bonuses_from_report(page)
                 if report_rows:
                     logger.info(
-                        "MarketingScraper: бонусный URL %s дал %d строк из отчёта",
-                        url,
-                        len(report_rows),
+                        "MarketingScraper: бонусный URL %s дал %d строк из отчёта (fallback)",
+                        url, len(report_rows),
                     )
                     collected.extend(report_rows)
                 elif not has_content:
                     logger.warning(
-                        "MarketingScraper: пропуск URL бонусов без контента: %s",
-                        url,
+                        "MarketingScraper: пропуск URL бонусов без контента: %s", url,
                     )
 
             bonus_data = self._deduplicate_bonuses(collected)
@@ -260,6 +286,232 @@ class MarketingScraper:
             len(result.errors),
         )
         return result
+
+    # -------------------------------------------------------------------------
+    # Drill-down: обход каждой кампании/акции и скачивание отчёта изнутри
+    # -------------------------------------------------------------------------
+
+    async def _scrape_all_campaign_drilldown(
+        self, page: Page, source: str = "kaspi_marketing"
+    ) -> list[AdCampaignData]:
+        """Собрать ссылки на кампании → зайти в каждую → скачать XLSX → вернуть товары."""
+        list_url = page.url
+        entries = await self._collect_list_entries(page)
+        if not entries:
+            return []
+
+        logger.info("MarketingScraper: drill-down маркетинг: %d кампаний", len(entries))
+        all_products: list[AdCampaignData] = []
+
+        for i, entry in enumerate(entries):
+            try:
+                rows = await self._scrape_entry_products_marketing(page, entry, source)
+                all_products.extend(rows)
+                logger.info(
+                    "MarketingScraper: кампания %d/%d «%s» → %d товаров",
+                    i + 1, len(entries), entry["name"][:50], len(rows),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "MarketingScraper: ошибка обработки кампании «%s»: %s",
+                    entry.get("name", "?")[:50], exc,
+                )
+            finally:
+                # Возврат на список кампаний
+                try:
+                    await page.goto(list_url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
+                    await page.wait_for_timeout(_CAMPAIGN_NAV_DELAY_MS)
+                except Exception:
+                    pass
+
+        return all_products
+
+    async def _scrape_all_bonus_drilldown(self, page: Page) -> list[BonusData]:
+        """Собрать ссылки на акции → зайти в каждую → скачать XLSX → вернуть бонусные товары."""
+        list_url = page.url
+        entries = await self._collect_list_entries(page)
+        if not entries:
+            return []
+
+        logger.info("MarketingScraper: drill-down бонусы: %d акций", len(entries))
+        all_bonuses: list[BonusData] = []
+
+        for i, entry in enumerate(entries):
+            try:
+                rows = await self._scrape_entry_products_bonus(page, entry)
+                all_bonuses.extend(rows)
+                logger.info(
+                    "MarketingScraper: акция %d/%d «%s» → %d товаров",
+                    i + 1, len(entries), entry["name"][:50], len(rows),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "MarketingScraper: ошибка обработки акции «%s»: %s",
+                    entry.get("name", "?")[:50], exc,
+                )
+            finally:
+                try:
+                    await page.goto(list_url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
+                    await page.wait_for_timeout(_CAMPAIGN_NAV_DELAY_MS)
+                except Exception:
+                    pass
+
+        return all_bonuses
+
+    async def _collect_list_entries(self, page: Page) -> list[dict[str, str]]:
+        """Скролл страницы-списка и сбор всех ссылок {url, name} (кампании или акции)."""
+        seen_urls: set[str] = set()
+        entries: list[dict[str, str]] = []
+        base_url = page.url
+        prev_count = 0
+
+        for iteration in range(60):
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1_500)
+
+            batch = await self._extract_list_entries_from_dom(page, base_url)
+            added = 0
+            for entry in batch:
+                if entry["url"] not in seen_urls:
+                    seen_urls.add(entry["url"])
+                    entries.append(entry)
+                    added += 1
+
+            if added == 0 and iteration > 0:
+                break
+            prev_count = len(entries)
+
+            if len(entries) >= _MAX_CAMPAIGN_ENTRIES:
+                break
+
+        logger.info(
+            "MarketingScraper: _collect_list_entries: собрано %d ссылок на %s",
+            len(entries), base_url,
+        )
+        return entries
+
+    async def _extract_list_entries_from_dom(
+        self, page: Page, base_url: str
+    ) -> list[dict[str, str]]:
+        """Извлечь ссылки и названия из DOM списка кампаний/акций."""
+        try:
+            result = await page.evaluate(
+                """(baseUrl) => {
+                    const entries = [];
+                    const seen = new Set();
+
+                    const rows = document.querySelectorAll(
+                        'table tbody tr, ' +
+                        '[role="row"]:not([role="columnheader"]), ' +
+                        '[class*="row"]:not([class*="header"]):not([class*="Row--header"]), ' +
+                        '[class*="item"]:not([class*="header"])'
+                    );
+
+                    rows.forEach(row => {
+                        const link = row.querySelector('a[href]');
+                        if (!link) return;
+
+                        const href = link.href || '';
+                        if (!href || !href.startsWith('http')) return;
+
+                        // Пропускаем саму страницу-список
+                        const normBase = baseUrl.replace(/\\/$/, '');
+                        const normHref = href.replace(/\\/$/, '').split('?')[0];
+                        if (normHref === normBase) return;
+                        // Должен быть вложенным путём
+                        if (!normHref.includes(normBase.split('/').slice(3).join('/'))) return;
+
+                        if (seen.has(href)) return;
+                        seen.add(href);
+
+                        const nameEl = (
+                            row.querySelector('[class*="name"]') ||
+                            row.querySelector('[class*="title"]') ||
+                            row.querySelector('[class*="campaign"]') ||
+                            row.querySelector('td:first-child, [role="cell"]:first-child') ||
+                            link
+                        );
+                        const name = (nameEl.innerText || '').trim()
+                            .replace(/\\s+/g, ' ').slice(0, 200);
+                        if (!name) return;
+
+                        entries.push({ url: href, name });
+                    });
+
+                    return entries;
+                }""",
+                base_url,
+            )
+            return result or []
+        except Exception as exc:
+            logger.debug("MarketingScraper: ошибка DOM-извлечения ссылок: %s", exc)
+            return []
+
+    async def _scrape_entry_products_marketing(
+        self, page: Page, entry: dict[str, str], source: str
+    ) -> list[AdCampaignData]:
+        """Зайти на страницу кампании, скачать XLSX, вернуть список AdCampaignData."""
+        await page.goto(entry["url"], wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
+        await self._random_delay()
+
+        if not await self._wait_for_content(page):
+            return []
+
+        campaign_name = entry.get("name", "")
+
+        # 1) XLSX отчёт
+        payload = await self._download_marketing_report_by_click(page)
+        if payload:
+            rows = await self._parse_marketing_report_payload(payload, page, depth=0)
+            if rows:
+                for r in rows:
+                    r.source = source
+                    # Сохраняем название кампании в raw_data через extra dict (через to_dao_dict)
+                    r._campaign_name = campaign_name  # type: ignore[attr-defined]
+                return rows
+
+        # 2) DOM fallback
+        rows = await self._scroll_and_collect_marketing_rows(page)
+        for r in rows:
+            r.source = source
+        return rows
+
+    async def _scrape_entry_products_bonus(
+        self, page: Page, entry: dict[str, str]
+    ) -> list[BonusData]:
+        """Зайти на страницу акции, скачать XLSX, вернуть список BonusData."""
+        await page.goto(entry["url"], wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
+        await self._random_delay()
+
+        if not await self._wait_for_content(page):
+            return []
+
+        promo_name = entry.get("name", "")
+
+        # 1) XLSX отчёт — пробуем оба парсера
+        payload = await self._download_marketing_report_by_click(page)
+        if payload:
+            # Сначала пробуем бонусный парсер (статус + %)
+            rows = await self._parse_bonus_report_payload(payload, page, depth=0)
+            if rows:
+                return rows
+            # Если не распознал — XLSX может быть в формате маркетинга (товар | метрики)
+            # Конвертируем AdCampaignData → BonusData
+            ad_rows = await self._parse_marketing_report_payload(payload, page, depth=0)
+            if ad_rows:
+                return [
+                    BonusData(
+                        product_sku=r.product_sku,
+                        product_name=r.product_name,
+                        bonus_active=True,
+                        bonus_percent=0.0,
+                        source="kaspi_bonus",
+                    )
+                    for r in ad_rows
+                ]
+
+        # 2) DOM fallback
+        return await self._scroll_and_collect_bonus_rows(page)
 
     # -------------------------------------------------------------------------
     # Вспомогательные методы
