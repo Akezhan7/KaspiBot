@@ -47,12 +47,13 @@ export default function WastedBudgetPage() {
         <h1 className="page-title">Слив бюджета</h1>
       </div>
       <p className="page-subtitle">
-        Товары с отрицательным ROI — затраты превышают выручку
+        Товары с отрицательным ROI (требуются данные о выручке)
       </p>
 
       {sorted.length === 0 ? (
-        <div className="empty-state success">
-          Все товары в плюсе — потерь не обнаружено
+        <div className="empty-state">
+          Нет данных о выручке — ROI не рассчитан.<br />
+          Данные о продажах в Kaspi Marketing недоступны через скрапинг.
         </div>
       ) : (
         <div className="product-list">

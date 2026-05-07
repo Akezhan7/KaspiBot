@@ -581,6 +581,7 @@ class MarketingScraper:
 
         headers = [self._normalize_header(v) for v in rows[header_idx]]
         idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description"])
+        idx_sku_col = self._find_col(headers, ["артикул", "код товара", "id товара", "product id", "product_id", "sku", "articul"])
         idx_clicks = self._find_col(headers, ["клик", "переход", "click"])
         idx_cpc = self._find_col(headers, ["ср. стоим", "средняя стоим", "cpc", "avg cost"])
         idx_spend = self._find_spend_column(headers)
@@ -627,7 +628,13 @@ class MarketingScraper:
                 cpc=cpc,
             )
 
-            sku = self._extract_or_build_sku(product_name)
+            # Если есть отдельная колонка с артикулом — использовать её
+            if idx_sku_col is not None:
+                raw_sku = self._cell_value(raw_row, idx_sku_col).strip()
+                sku = raw_sku if re.match(r"^\d{5,12}$", raw_sku) else self._extract_or_build_sku(product_name)
+            else:
+                sku = self._extract_or_build_sku(product_name)
+
             campaigns.append(
                 AdCampaignData(
                     product_sku=sku,
@@ -787,6 +794,7 @@ class MarketingScraper:
 
         headers = [self._normalize_header(v) for v in rows[header_idx]]
         idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description"])
+        idx_sku_col = self._find_col(headers, ["артикул", "код товара", "id товара", "product id", "product_id", "sku", "articul"])
         idx_clicks = self._find_col(headers, ["клик", "переход", "click"])
         idx_cpc = self._find_col(headers, ["ср. стоим", "средняя стоим", "cpc", "avg cost"])
         idx_spend = self._find_spend_column(headers)
@@ -840,7 +848,12 @@ class MarketingScraper:
                 cpc=cpc,
             )
 
-            sku = self._extract_or_build_sku(product_name)
+            if idx_sku_col is not None:
+                raw_sku = str(raw_row[idx_sku_col]).strip() if idx_sku_col < len(raw_row) else ""
+                sku = raw_sku if re.match(r"^\d{5,12}$", raw_sku) else self._extract_or_build_sku(product_name)
+            else:
+                sku = self._extract_or_build_sku(product_name)
+
             campaigns.append(
                 AdCampaignData(
                     product_sku=sku,
@@ -1379,8 +1392,8 @@ class MarketingScraper:
             if len(cell_texts) < 4:
                 return None
 
-            # Извлечение SKU из первой ячейки
-            sku, name = self._extract_sku_and_name(cell_texts[0], cells[0])
+            # Извлечение SKU из первой ячейки (включая href ссылок)
+            sku, name = await self._extract_sku_and_name(cell_texts[0], cells[0])
             if not sku:
                 return None
 
@@ -1429,18 +1442,19 @@ class MarketingScraper:
             logger.debug("MarketingScraper: ошибка парсинга строки: %s", e)
             return None
 
-    def _extract_sku_and_name(self, cell_text: str, cell_element) -> tuple[str, str]:
+    async def _extract_sku_and_name(self, cell_text: str, cell_element) -> tuple[str, str]:
         """Извлечение SKU и названия из ячейки товара.
 
-        Kaspi Pay обычно показывает: «Название товара\nSKU: 123456»
-        или просто код артикула.
+        Kaspi Pay обычно показывает: «Название товара\nSKU: 123456»,
+        или SKU в href ссылки вида /shop/p/slug-123456789.
         """
         if not cell_text:
             return ("", "")
 
         lines = [ln.strip() for ln in cell_text.split("\n") if ln.strip()]
 
-        # Паттерн: артикул на отдельной строке (только цифры / цифры с буквами)
+        # Паттерн: реальный Kaspi-артикул (9–12 цифр) или общий код (5–20 alphanum)
+        kaspi_sku_pattern = re.compile(r"^\d{9,12}$")
         sku_pattern = re.compile(r"^\d{5,12}$|^[A-Z0-9\-]{5,20}$")
 
         sku = ""
@@ -1449,24 +1463,39 @@ class MarketingScraper:
         if len(lines) >= 2:
             for line in lines:
                 if sku_pattern.match(line):
-                    sku = line
+                    sku = sku or line
                 else:
                     name = name or line
         elif len(lines) == 1:
-            # Единственная строка — может быть только SKU или только имя
             if sku_pattern.match(lines[0]):
                 sku = lines[0]
             else:
                 name = lines[0]
 
-        # Если SKU не найден, пробуем извлечь из data-атрибутов
-        # (не await — синхронный контекст)
+        # Паттерн в тексте: «SKU: 123456» или «Арт. 123456»
         if not sku and name:
-            # Паттерн в тексте: «SKU: 123456» или «Арт. 123456»
             m = re.search(r"(?:SKU|Арт\.?|sku)[:\s]+(\d{5,12})", name, re.IGNORECASE)
             if m:
                 sku = m.group(1)
                 name = name.replace(m.group(0), "").strip()
+
+        # Если реальный Kaspi SKU (9–12 цифр) не найден в тексте —
+        # пробуем извлечь из href ссылки в ячейке (приоритет над коротким ID)
+        if not kaspi_sku_pattern.match(sku):
+            try:
+                link = await cell_element.query_selector("a[href]")
+                if link:
+                    href = await link.get_attribute("href") or ""
+                    # /shop/p/plastkrep-slug-123576929 или /mc/goods/123576929
+                    m = re.search(r"[-/](\d{9,12})(?:[/?#]|$)", href)
+                    if m:
+                        sku = m.group(1)
+            except Exception:
+                pass
+
+        # Если SKU так и не найден — стабильный surrogate
+        if not sku:
+            sku = self._extract_or_build_sku(name or cell_text[:80])
 
         return (sku, name or cell_text[:80])
 
@@ -1510,7 +1539,7 @@ class MarketingScraper:
                 text = await cell.inner_text()
                 cell_texts.append(text.strip())
 
-            sku, name = self._extract_sku_and_name(cell_texts[0], cells[0])
+            sku, name = await self._extract_sku_and_name(cell_texts[0], cells[0])
             if not sku:
                 return None
 

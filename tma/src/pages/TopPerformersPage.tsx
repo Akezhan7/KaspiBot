@@ -42,7 +42,9 @@ export default function TopPerformersPage() {
       <p className="page-subtitle">Лучший ROAS (выручка / затраты)</p>
 
       {items.length === 0 ? (
-        <div className="empty-state">Нет данных</div>
+        <div className="empty-state">
+          Нет данных — для расчёта ROAS нужны данные о выручке
+        </div>
       ) : (
         <div className="product-list">
           {items.map((item, idx) => (

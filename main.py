@@ -218,7 +218,14 @@ async def on_startup():
     applied = await migrations.run_migrations()
     if applied > 0:
         logger.info(f"Применено {applied} миграций БД")
-    
+
+    # Синхронизация товаров из серверной БД если таблица пуста
+    _server_db = Config.DB_PATH.parent / "Kaspi Monitor_fromserv.db"
+    if _server_db.exists():
+        _synced = await ProductsDB(str(Config.DB_PATH)).sync_from_db(str(_server_db))
+        if _synced > 0:
+            logger.info("Синхронизировано %d товаров из серверной БД", _synced)
+
     # Уведомление админов о запуске
     await notification_service.send_to_admins(
         "<b>Бот запущен</b>\n\n"
