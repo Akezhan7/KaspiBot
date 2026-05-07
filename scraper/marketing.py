@@ -1163,8 +1163,77 @@ class MarketingScraper:
         full_url = urljoin(page.url, raw_url)
         return self._apply_report_period(full_url)
 
+    async def _download_report_via_link_href(self, page: Page) -> bytes | None:
+        """Скачать отчёт по прямой ссылке `<a href>` с URL XLSX/CSV.
+
+        Покрывает кейс, когда на странице есть `<a class="m-share-button" href="...report/xlsx">`
+        с иконкой загрузки (без текста). На страницах бонусов за отзывы у Kaspi
+        именно такая структура.
+        """
+        try:
+            href_list: list[str] = await page.evaluate(
+                """() => {
+                    const out = [];
+                    const anchors = document.querySelectorAll('a[href]');
+                    anchors.forEach(a => {
+                        const href = a.href || '';
+                        if (!href || !href.startsWith('http')) return;
+                        const lower = href.toLowerCase();
+                        // Прямые ссылки на скачивание отчётов
+                        const looksLikeReport = (
+                            (lower.includes('/report/') || lower.includes('/reports/') ||
+                             lower.includes('/export') || lower.includes('/download')) &&
+                            (lower.includes('xlsx') || lower.includes('csv') || lower.includes('format='))
+                        );
+                        // Иконочные кнопки share/download (Kaspi UI: m-share-button)
+                        const cls = (a.className || '').toString().toLowerCase();
+                        const isShareBtn = cls.includes('share-button') || cls.includes('download');
+                        if (looksLikeReport || (isShareBtn && href.length > 0)) {
+                            out.push(href);
+                        }
+                    });
+                    return out;
+                }"""
+            ) or []
+        except Exception as exc:
+            logger.debug("MarketingScraper: ошибка поиска report-href: %s", exc)
+            return None
+
+        # Дедуплицируем сохраняя порядок
+        seen: set[str] = set()
+        unique_hrefs = [h for h in href_list if not (h in seen or seen.add(h))]
+        if not unique_hrefs:
+            return None
+
+        for raw_href in unique_hrefs:
+            url = self._apply_report_period(raw_href)
+            try:
+                response = await self._context.request.get(url, timeout=_PAGE_LOAD_TIMEOUT)
+                if not response.ok:
+                    logger.debug(
+                        "MarketingScraper: report-href HTTP %s для %s",
+                        response.status, url,
+                    )
+                    continue
+                body = await response.body()
+                if body and len(body) > 100:
+                    logger.info(
+                        "MarketingScraper: отчёт получен по прямой ссылке (%s, %d байт)",
+                        url, len(body),
+                    )
+                    return body
+            except Exception as exc:
+                logger.debug("MarketingScraper: ошибка загрузки %s: %s", url, exc)
+        return None
+
     async def _download_marketing_report_by_click(self, page: Page) -> bytes | None:
-        """Скачать отчёт через клик по кнопке "Скачать отчет"."""
+        """Скачать отчёт: сначала по прямой ссылке `<a href>`, затем кликом по кнопке."""
+        # 1) Прямая ссылка (например, иконочная кнопка m-share-button с href на XLSX)
+        body = await self._download_report_via_link_href(page)
+        if body:
+            return body
+
+        # 2) Кликабельные кнопки с текстом
         selectors = [
             "button:has-text('Скачать отчет')",
             "button:has-text('Скачать отчёт')",
@@ -1179,6 +1248,11 @@ class MarketingScraper:
             "a:has-text('Выгрузить')",
             "a:has-text('Экспорт')",
             "[class*='download-report']",
+            "a.m-share-button",
+            "a[class*='share-button']",
+            "[aria-label*='Скачать' i]",
+            "[aria-label*='download' i]",
+            "[title*='Скачать' i]",
         ]
 
         for selector in selectors:
