@@ -46,7 +46,7 @@ _MAX_SCROLL_ITERATIONS = 500
 
 # Drill-down: максимум кампаний/акций за один сеанс и задержка между ними
 _MAX_CAMPAIGN_ENTRIES = 300
-_CAMPAIGN_NAV_DELAY_MS = 2_000
+_CAMPAIGN_NAV_DELAY_MS = 800
 
 _XLSX_NS = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 
@@ -99,15 +99,16 @@ class MarketingScraper:
 
     @staticmethod
     def _marketing_urls() -> list[str]:
-        """Список URL-ов «Мои кампании / Активные» (drill-down ищет ссылки на конкретные кампании)."""
+        """Все разделы рекламных кампаний — drill-down проходит по каждому.
+
+        Включает:
+        1. Реклама товаров (внутренняя) — /advertising/campaigns
+        2. Внешняя реклама — /external/advertising/products/campaigns
+        """
         candidates = [
-            # Конфигурируемый URL (по умолчанию /advertising/overview?activeTab=Enabled)
-            Config.KASPI_MARKETING_ADS_URL.strip(),
-            # Альтернативные пути к списку кампаний
             "https://marketing.kaspi.kz/advertising/campaigns?activeTab=Enabled",
-            "https://marketing.kaspi.kz/advertising/campaigns/list?state=Enabled",
-            _CANONICAL_MARKETING_PRODUCTS_URL,
-            _LEGACY_MARKETING_URL,
+            "https://marketing.kaspi.kz/external/advertising/products/campaigns?tab=overview&activeTab=Enabled",
+            Config.KASPI_MARKETING_ADS_URL.strip(),
         ]
         return [url for idx, url in enumerate(candidates) if url and url not in candidates[:idx]]
 
@@ -125,49 +126,60 @@ class MarketingScraper:
         return [url for idx, url in enumerate(candidates) if url and url not in candidates[:idx]]
 
     async def scrape_marketing(self) -> list[AdCampaignData]:
-        """Собрать данные из раздела «Kaspi Marketing» (рекламные кампании).
+        """Собрать данные из всех разделов рекламы (внутренняя + внешняя).
 
-        Подход: заходим в каждую кампанию из списка «Мои кампании»
-        и скачиваем отчёт изнутри — там реальные названия товаров.
-
-        Fallback на верхний уровень УДАЛЁН намеренно: верхний уровень содержит
-        названия кампаний и внутренние ID/RPT-коды, а не настоящие товары.
+        Заходим в КАЖДУЮ кампанию из «Мои кампании / Активные» (по обоим
+        разделам), скачиваем XLSX-отчёт изнутри. Источник кампании
+        определяется по URL: /external/ → kaspi_external_ads, иначе kaspi_marketing.
         """
         page: Page | None = None
+        all_products: list[AdCampaignData] = []
         try:
             page = await self._context.new_page()
             for url in self._marketing_urls():
-                logger.info("MarketingScraper: переход на страницу маркетинга %s", url)
-                await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
-                await self._random_delay()
+                source = "kaspi_external_ads" if "/external/" in url else "kaspi_marketing"
+                logger.info(
+                    "MarketingScraper: переход на страницу маркетинга %s (source=%s)",
+                    url, source,
+                )
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
+                    await self._random_delay()
+                except Exception as exc:
+                    logger.warning("MarketingScraper: не удалось открыть %s: %s", url, exc)
+                    continue
 
-                products = await self._scrape_all_campaign_drilldown(page, source="kaspi_marketing")
+                products = await self._scrape_all_campaign_drilldown(page, source=source)
                 if products:
                     logger.info(
-                        "MarketingScraper: drill-down дал %d товаров из %d уникальных SKU",
-                        len(products),
-                        len({r.product_sku for r in products}),
+                        "MarketingScraper: %s → %d товаров из %d уникальных SKU",
+                        source, len(products), len({r.product_sku for r in products}),
                     )
-                    return products
+                    all_products.extend(products)
+                else:
+                    logger.warning(
+                        "MarketingScraper: drill-down не нашёл кампании на %s", url,
+                    )
 
-                logger.warning(
-                    "MarketingScraper: drill-down не нашёл кампании на %s — пробуем следующий URL",
-                    url,
+            if not all_products:
+                logger.error(
+                    "MarketingScraper: ни в одном разделе не удалось собрать товары. "
+                    "Проверьте: 1) залогинен ли кабинет, 2) есть ли активные кампании, "
+                    "3) совпадают ли селекторы со структурой DOM."
                 )
-
-            logger.error(
-                "MarketingScraper: drill-down не нашёл кампании ни на одном URL. "
-                "Проверьте: 1) залогинен ли кабинет, 2) есть ли активные кампании, "
-                "3) совпадают ли селекторы со структурой DOM."
-            )
-            return []
+            else:
+                logger.info(
+                    "MarketingScraper: всего собрано %d товаров (внутренняя+внешняя реклама)",
+                    len(all_products),
+                )
+            return all_products
 
         except PlaywrightTimeoutError as e:
             logger.error("MarketingScraper: таймаут при сборе маркетинга: %s", e)
-            return []
+            return all_products
         except Exception as e:
             logger.error("MarketingScraper: ошибка сбора маркетинга: %s", e, exc_info=True)
-            return []
+            return all_products
         finally:
             if page:
                 await page.close()
@@ -197,7 +209,7 @@ class MarketingScraper:
                 await self._random_delay()
 
                 # 1) Drill-down в каждую акцию → реальные товары
-                drill_rows = await self._scrape_all_bonus_drilldown(page)
+                drill_rows, drill_attempted = await self._scrape_all_bonus_drilldown(page)
                 if drill_rows:
                     logger.info(
                         "MarketingScraper: drill-down дал %d бонусных товаров с %s",
@@ -206,7 +218,17 @@ class MarketingScraper:
                     collected.extend(drill_rows)
                     continue
 
-                # 2) Fallback: DOM верхнего уровня
+                # Если drill-down реально проходил по акциям, но не дал товаров —
+                # НЕ делаем fallback на верхнеуровневый XLSX (там названия акций, не товаров).
+                if drill_attempted:
+                    logger.warning(
+                        "MarketingScraper: drill-down прошёл по акциям на %s, но 0 товаров. "
+                        "Fallback на верхний XLSX отключён (он содержит названия акций).",
+                        url,
+                    )
+                    continue
+
+                # 2) Fallback: DOM верхнего уровня (только если drill-down НЕ нашёл список)
                 has_content = await self._wait_for_content(page)
                 dom_rows: list[BonusData] = []
                 if has_content:
@@ -323,12 +345,18 @@ class MarketingScraper:
 
         return all_products
 
-    async def _scrape_all_bonus_drilldown(self, page: Page) -> list[BonusData]:
-        """Собрать ссылки на акции → зайти в каждую → скачать XLSX → вернуть бонусные товары."""
+    async def _scrape_all_bonus_drilldown(
+        self, page: Page
+    ) -> tuple[list[BonusData], bool]:
+        """Drill-down по акциям. Возвращает (товары, attempted).
+
+        attempted=True если нашли список акций (даже если по 0 товаров на каждой):
+        в таком случае НЕ нужен fallback на верхний XLSX (там названия акций, не товаров).
+        """
         list_url = page.url
         entries = await self._collect_list_entries(page)
         if not entries:
-            return []
+            return [], False
 
         logger.info("MarketingScraper: drill-down бонусы: %d акций", len(entries))
         all_bonuses: list[BonusData] = []
@@ -353,71 +381,236 @@ class MarketingScraper:
                 except Exception:
                     pass
 
-        return all_bonuses
+        return all_bonuses, True
+
+    # Слова в названии, по которым отсеиваем ложные «ссылки» (кнопки и т.п.)
+    _BAD_ENTRY_NAMES = (
+        "скачать отчет", "скачать отчёт", "скачать", "выгрузить", "экспорт",
+        "создать новую", "создать акцию", "создать кампанию", "новая акция",
+        "новая кампания", "добавить", "редактировать", "настройки",
+        "download", "export", "create", "edit",
+    )
+
+    @classmethod
+    def _is_bad_entry_name(cls, name: str) -> bool:
+        n = (name or "").strip().lower()
+        if not n or len(n) < 2:
+            return True
+        return any(bad in n for bad in cls._BAD_ENTRY_NAMES)
 
     async def _collect_list_entries(self, page: Page) -> list[dict[str, str]]:
-        """Скролл страницы-списка и сбор всех ссылок {url, name} (кампании или акции)."""
-        seen_urls: set[str] = set()
-        entries: list[dict[str, str]] = []
+        """Сбор ссылок {url, name} на кампании/акции с listing-страницы.
+
+        Алгоритм:
+        1. Скроллим страницу до конца, ищем `<a href>` через _extract_list_entries_from_dom.
+        2. Если ссылок мало (< 5) — fallback: кликаем по каждой карточке и
+           считаем URL после навигации (для SPA-карточек без href).
+        Отсеиваем имена-кнопки («Скачать отчёт», «Создать новую» и т.п.).
+        """
         base_url = page.url
 
-        # Дать странице полностью прогрузить динамическое содержимое
         try:
             await page.wait_for_load_state("networkidle", timeout=15_000)
         except Exception:
             pass
 
-        empty_iters = 0
-        for iteration in range(60):
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1_500)
+        # 1) Полный скролл (виртуализация)
+        await self._scroll_to_load_all(page)
 
-            batch = await self._extract_list_entries_from_dom(page, base_url)
-            added = 0
-            for entry in batch:
-                if entry["url"] not in seen_urls:
-                    seen_urls.add(entry["url"])
-                    entries.append(entry)
-                    added += 1
-
-            if added == 0:
-                empty_iters += 1
-                # Прерываемся если уже три итерации подряд ничего не добавилось
-                if empty_iters >= 3:
-                    break
-            else:
-                empty_iters = 0
-
+        # 2) Попытка через `<a href>`
+        seen_urls: set[str] = set()
+        entries: list[dict[str, str]] = []
+        for entry in await self._extract_list_entries_from_dom(page, base_url):
+            if entry["url"] in seen_urls:
+                continue
+            if self._is_bad_entry_name(entry.get("name", "")):
+                continue
+            seen_urls.add(entry["url"])
+            entries.append(entry)
             if len(entries) >= _MAX_CAMPAIGN_ENTRIES:
                 break
 
         if entries:
-            sample = ", ".join(e["name"][:30] for e in entries[:3])
+            sample = " | ".join(e["name"][:40] for e in entries[:3])
             logger.info(
-                "MarketingScraper: _collect_list_entries: собрано %d ссылок на %s | примеры: %s",
+                "MarketingScraper: _collect_list_entries (href): %d ссылок на %s | примеры: %s",
                 len(entries), base_url, sample,
             )
-        else:
-            # Диагностика: счётчики DOM, чтобы понять почему ничего не нашли
+            return entries
+
+        # 3) Fallback: кликаем по карточкам (для SPA без `<a href>`)
+        logger.info(
+            "MarketingScraper: ссылок через href не найдено — "
+            "пробуем сбор через клики по карточкам на %s", base_url,
+        )
+        try:
+            click_entries = await self._collect_list_entries_via_clicks(page, base_url)
+        except Exception as exc:
+            logger.warning("MarketingScraper: ошибка сбора через клики: %s", exc)
+            click_entries = []
+
+        if click_entries:
+            sample = " | ".join(e["name"][:40] for e in click_entries[:3])
+            logger.info(
+                "MarketingScraper: _collect_list_entries (click): %d ссылок на %s | примеры: %s",
+                len(click_entries), base_url, sample,
+            )
+            return click_entries
+
+        # 4) Диагностика
+        try:
+            stats = await page.evaluate(
+                """() => ({
+                    anchors: document.querySelectorAll('a[href]').length,
+                    rows: document.querySelectorAll('tr, [role="row"]').length,
+                    cards: document.querySelectorAll('[class*="card"], [class*="item"]').length,
+                    title: document.title,
+                })"""
+            )
+            logger.warning(
+                "MarketingScraper: _collect_list_entries: 0 ссылок на %s | "
+                "anchors=%s, rows=%s, cards=%s, title=%r",
+                base_url, stats.get("anchors"), stats.get("rows"),
+                stats.get("cards"), stats.get("title"),
+            )
+        except Exception:
+            logger.warning("MarketingScraper: _collect_list_entries: 0 ссылок на %s", base_url)
+        return []
+
+    async def _scroll_to_load_all(self, page: Page) -> None:
+        """Скроллит страницу до конца, чтобы виртуализированный список подгрузил все элементы."""
+        prev_height = 0
+        for _ in range(60):
             try:
-                stats = await page.evaluate(
-                    """() => ({
-                        anchors: document.querySelectorAll('a[href]').length,
-                        rows: document.querySelectorAll('tr, [role="row"]').length,
-                        cards: document.querySelectorAll('[class*="card"], [class*="item"]').length,
-                        title: document.title,
-                        href: location.href,
-                    })"""
-                )
-                logger.warning(
-                    "MarketingScraper: _collect_list_entries: 0 ссылок на %s | "
-                    "anchors=%s, rows=%s, cards=%s, title=%r",
-                    base_url, stats.get("anchors"), stats.get("rows"),
-                    stats.get("cards"), stats.get("title"),
-                )
+                height = await page.evaluate("document.body.scrollHeight")
             except Exception:
-                logger.warning("MarketingScraper: _collect_list_entries: 0 ссылок на %s", base_url)
-        return entries
+                break
+            if height == prev_height:
+                # Достигли конца
+                break
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1_500)
+            prev_height = height
+
+    async def _collect_list_entries_via_clicks(
+        self, page: Page, list_url: str
+    ) -> list[dict[str, str]]:
+        """Кликает по каждой кликабельной карточке, считает URL после навигации, возвращается.
+
+        Используется когда карточки кампаний — это `<div onClick=...>` без `<a href>`.
+        Результат: список {url, name}.
+        """
+        # Селектор кликабельных строк/карточек — широкий
+        # Берём только те, у которых есть текст и которые НЕ в навигации
+        click_index_js = """() => {
+            const out = [];
+            const candidates = document.querySelectorAll(
+                '[class*="card" i]:not([class*="header" i]):not([class*="footer" i]), ' +
+                'tbody tr:not([class*="header" i]), ' +
+                '[role="row"]:not([role="columnheader"])'
+            );
+            candidates.forEach((el, idx) => {
+                if (el.closest('header, nav, aside, footer, [role="navigation"]')) return;
+                const text = (el.innerText || '').trim();
+                if (!text || text.length < 2) return;
+                // Только видимые
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return;
+                out.push({ idx, name: text.split('\\n')[0].slice(0, 200) });
+            });
+            return out;
+        }"""
+
+        candidates: list[dict] = await page.evaluate(click_index_js) or []
+        # Отсев кнопок «Скачать отчёт» и пр.
+        candidates = [c for c in candidates if not self._is_bad_entry_name(c.get("name", ""))]
+        candidates = candidates[:_MAX_CAMPAIGN_ENTRIES]
+
+        logger.info(
+            "MarketingScraper: click-fallback: найдено %d потенциальных карточек на %s",
+            len(candidates), list_url,
+        )
+
+        results: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        # Берём селектор для поиска карточек по индексу. Должен совпадать с порядком в JS.
+        click_and_scroll_js = """(targetIdx) => {
+            const candidates = document.querySelectorAll(
+                '[class*="card" i]:not([class*="header" i]):not([class*="footer" i]), ' +
+                'tbody tr:not([class*="header" i]), ' +
+                '[role="row"]:not([role="columnheader"])'
+            );
+            let visibleIdx = 0;
+            for (const el of candidates) {
+                if (el.closest('header, nav, aside, footer, [role="navigation"]')) continue;
+                const text = (el.innerText || '').trim();
+                if (!text || text.length < 2) continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+                if (visibleIdx === targetIdx) {
+                    el.scrollIntoView({ block: 'center' });
+                    el.click();
+                    return true;
+                }
+                visibleIdx++;
+            }
+            return false;
+        }"""
+
+        async def click_card(idx: int) -> str | None:
+            """Клик по idx-й карточке + ожидание смены URL (для SPA с pushState)."""
+            url_before = page.url
+            try:
+                clicked = await page.evaluate(click_and_scroll_js, idx)
+            except Exception as exc:
+                logger.debug("click_card eval(%d): %s", idx, exc)
+                return None
+            if not clicked:
+                return None
+
+            # SPA с React Router использует pushState — обычный navigation event не работает.
+            # Ждём пока URL не сменится.
+            try:
+                await page.wait_for_function(
+                    "(prev) => location.href !== prev",
+                    arg=url_before,
+                    timeout=6_000,
+                )
+            except PlaywrightTimeoutError:
+                return None
+            except Exception as exc:
+                logger.debug("click_card wait_for_function(%d): %s", idx, exc)
+                return None
+
+            # Дождаться окончания загрузки нового маршрута
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
+            except Exception:
+                pass
+
+            new_url = page.url
+            return new_url if new_url and new_url != url_before else None
+
+        for i, cand in enumerate(candidates):
+            try:
+                detail_url = await click_card(i)
+                if detail_url and detail_url not in seen_urls:
+                    seen_urls.add(detail_url)
+                    results.append({"url": detail_url, "name": cand.get("name", "") or detail_url})
+            except Exception as exc:
+                logger.debug("click_card(%d) failed: %s", i, exc)
+
+            # Возврат на listing
+            try:
+                if page.url != list_url:
+                    await page.goto(list_url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
+                    await page.wait_for_timeout(800)
+                    await self._scroll_to_load_all(page)
+            except Exception:
+                pass
+
+        return results
 
     async def _extract_list_entries_from_dom(
         self, page: Page, base_url: str
@@ -502,30 +695,32 @@ class MarketingScraper:
     async def _scrape_entry_products_marketing(
         self, page: Page, entry: dict[str, str], source: str
     ) -> list[AdCampaignData]:
-        """Зайти на страницу кампании, скачать XLSX, вернуть список AdCampaignData."""
+        """Зайти на страницу кампании, скачать XLSX, вернуть список AdCampaignData.
+
+        НЕ ждём таблицу: на детальной странице кампании может не быть таблицы товаров,
+        но есть кнопка «Скачать отчёт» — её мы и пытаемся нажать.
+        """
         await page.goto(entry["url"], wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
         await self._random_delay()
-
-        if not await self._wait_for_content(page):
-            return []
+        # Дождаться появления интерактивных элементов (кнопок), без требования таблицы
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        except Exception:
+            pass
 
         campaign_name = entry.get("name", "")
 
-        # 1) XLSX отчёт
         payload = await self._download_marketing_report_by_click(page)
-        if payload:
-            rows = await self._parse_marketing_report_payload(payload, page, depth=0)
-            if rows:
-                for r in rows:
-                    r.source = source
-                    # Сохраняем название кампании в raw_data через extra dict (через to_dao_dict)
-                    r._campaign_name = campaign_name  # type: ignore[attr-defined]
-                return rows
+        if not payload:
+            return []
 
-        # 2) DOM fallback
-        rows = await self._scroll_and_collect_marketing_rows(page)
+        rows = await self._parse_marketing_report_payload(payload, page, depth=0)
+        if not rows:
+            return []
+
         for r in rows:
             r.source = source
+            r._campaign_name = campaign_name  # type: ignore[attr-defined]
         return rows
 
     async def _scrape_entry_products_bonus(
@@ -534,36 +729,33 @@ class MarketingScraper:
         """Зайти на страницу акции, скачать XLSX, вернуть список BonusData."""
         await page.goto(entry["url"], wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
         await self._random_delay()
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10_000)
+        except Exception:
+            pass
 
-        if not await self._wait_for_content(page):
+        payload = await self._download_marketing_report_by_click(page)
+        if not payload:
             return []
 
-        promo_name = entry.get("name", "")
-
-        # 1) XLSX отчёт — пробуем оба парсера
-        payload = await self._download_marketing_report_by_click(page)
-        if payload:
-            # Сначала пробуем бонусный парсер (статус + %)
-            rows = await self._parse_bonus_report_payload(payload, page, depth=0)
-            if rows:
-                return rows
-            # Если не распознал — XLSX может быть в формате маркетинга (товар | метрики)
-            # Конвертируем AdCampaignData → BonusData
-            ad_rows = await self._parse_marketing_report_payload(payload, page, depth=0)
-            if ad_rows:
-                return [
-                    BonusData(
-                        product_sku=r.product_sku,
-                        product_name=r.product_name,
-                        bonus_active=True,
-                        bonus_percent=0.0,
-                        source="kaspi_bonus",
-                    )
-                    for r in ad_rows
-                ]
-
-        # 2) DOM fallback
-        return await self._scroll_and_collect_bonus_rows(page)
+        # Сначала бонусный парсер (статус + %)
+        rows = await self._parse_bonus_report_payload(payload, page, depth=0)
+        if rows:
+            return rows
+        # Иначе — формат маркетинга, конвертируем
+        ad_rows = await self._parse_marketing_report_payload(payload, page, depth=0)
+        if ad_rows:
+            return [
+                BonusData(
+                    product_sku=r.product_sku,
+                    product_name=r.product_name,
+                    bonus_active=True,
+                    bonus_percent=0.0,
+                    source="kaspi_bonus",
+                )
+                for r in ad_rows
+            ]
+        return []
 
     # -------------------------------------------------------------------------
     # Вспомогательные методы
@@ -972,23 +1164,21 @@ class MarketingScraper:
         return self._apply_report_period(full_url)
 
     async def _download_marketing_report_by_click(self, page: Page) -> bytes | None:
-        """Скачать отчёт через клик по кнопке "Скачать отчет" (fallback)."""
+        """Скачать отчёт через клик по кнопке "Скачать отчет"."""
         selectors = [
             "button:has-text('Скачать отчет')",
             "button:has-text('Скачать отчёт')",
+            "a:has-text('Скачать отчет')",
+            "a:has-text('Скачать отчёт')",
             "button:has-text('Скачать')",
             "button:has-text('Выгрузить')",
             "button:has-text('Экспорт')",
             "button:has-text('Download report')",
             "button:has-text('Export')",
-            "a:has-text('Скачать отчет')",
-            "a:has-text('Скачать отчёт')",
             "a:has-text('Скачать')",
             "a:has-text('Выгрузить')",
             "a:has-text('Экспорт')",
             "[class*='download-report']",
-            "[class*='download']",
-            "[class*='export']",
         ]
 
         for selector in selectors:
@@ -996,11 +1186,12 @@ class MarketingScraper:
                 locator = page.locator(selector).first
                 if await locator.count() == 0:
                     continue
-
-                await locator.wait_for(state="visible", timeout=7_000)
+                # Видимость проверяем без длинного ожидания: если кнопка уже не видна — скип
+                if not await locator.is_visible():
+                    continue
                 logger.info("MarketingScraper: пробуем скачать отчёт кликом (%s)", selector)
 
-                async with page.expect_download(timeout=_PAGE_LOAD_TIMEOUT) as download_info:
+                async with page.expect_download(timeout=20_000) as download_info:
                     await locator.click()
 
                 download = await download_info.value
