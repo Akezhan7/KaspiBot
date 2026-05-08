@@ -402,13 +402,25 @@ class MarketingScraper:
         return any(bad in n for bad in cls._BAD_ENTRY_NAMES)
 
     async def _collect_list_entries(self, page: Page) -> list[dict[str, str]]:
-        """Сбор ссылок {url, name} на кампании/акции с listing-страницы.
+        """Сбор ссылок {url, name} на детальные страницы кампаний/акций.
 
-        Алгоритм:
-        1. Скроллим страницу до конца, ищем `<a href>` через _extract_list_entries_from_dom.
-        2. Если ссылок мало (< 5) — fallback: кликаем по каждой карточке и
-           считаем URL после навигации (для SPA-карточек без href).
-        Отсеиваем имена-кнопки («Скачать отчёт», «Создать новую» и т.п.).
+        Алгоритм (устойчивый к изменениям вёрстки):
+
+        1. Дождаться появления первых ссылок-кандидатов в DOM.
+        2. Прокручивать ВСЕ скролл-контейнеры на странице (включая виртуализированные
+           Vue/React-скроллеры) + window. На каждой итерации забирать видимые
+           ссылки в накопительный Set. Стоп — когда Set перестаёт расти.
+        3. Из ожидаемого числа кампаний (чип «Активные (N)») понимаем, сколько
+           ещё нужно — если уже набрали ≥ N, заканчиваем досрочно.
+
+        Идентификация ссылки кампании — по структуре URL:
+          - тот же origin, что у базы;
+          - первый сегмент пути совпадает с разделом базы (`advertising`, `bonuses`,
+            `external`, `promotions`);
+          - URL отличается от базы;
+          - последний сегмент пути — числовой ID или slug (не служебное слово
+            `list`/`overview`/`reports`/`api`/...);
+          - ссылка НЕ из явной навигации (header/nav/aside/footer).
         """
         base_url = page.url
 
@@ -417,60 +429,232 @@ class MarketingScraper:
         except Exception:
             pass
 
-        # 1) Полный скролл (виртуализация)
-        await self._scroll_to_load_all(page)
+        # Сколько активных кампаний ожидаем (читаем из чипа «Активные (N)»)
+        expected = await self._read_expected_count(page)
+        if expected:
+            logger.info(
+                "MarketingScraper: ожидаемое число активных кампаний на %s: %d",
+                base_url, expected,
+            )
 
-        # 2) Попытка через `<a href>`
-        seen_urls: set[str] = set()
+        # Накопительный сбор: скроллим все контейнеры + читаем DOM на каждой итерации
+        collected = await self._collect_links_with_scroll(page, base_url, expected)
+
+        # Финальная пост-фильтрация по «плохим именам» и слайс
         entries: list[dict[str, str]] = []
-        for entry in await self._extract_list_entries_from_dom(page, base_url):
-            if entry["url"] in seen_urls:
+        seen_urls: set[str] = set()
+        for url, name in collected.items():
+            if url in seen_urls:
                 continue
-            if self._is_bad_entry_name(entry.get("name", "")):
+            if self._is_bad_entry_name(name):
                 continue
-            seen_urls.add(entry["url"])
-            entries.append(entry)
+            seen_urls.add(url)
+            entries.append({"url": url, "name": name})
             if len(entries) >= _MAX_CAMPAIGN_ENTRIES:
                 break
 
         if entries:
             sample = " | ".join(e["name"][:40] for e in entries[:3])
             logger.info(
-                "MarketingScraper: _collect_list_entries (href): %d ссылок на %s | примеры: %s",
+                "MarketingScraper: _collect_list_entries: %d ссылок на %s | примеры: %s",
                 len(entries), base_url, sample,
             )
             return entries
 
-        # 3) Диагностика: сохраняем HTML страницы для анализа и логируем структуру
+        # Диагностика: сохраняем HTML и логируем структуру
+        await self._log_zero_links_diagnostics(page, base_url)
+        return []
+
+    async def _read_expected_count(self, page: Page) -> int | None:
+        """Читает ожидаемое число активных кампаний из чипа `Активные (N)`."""
+        try:
+            count = await page.evaluate(
+                r"""() => {
+                    const re = /(?:актив|active)[^\d]*(\d+)/i;
+                    const els = document.querySelectorAll('button, [role="checkbox"], [class*="chip" i], [class*="tab" i]');
+                    for (const el of els) {
+                        const t = (el.innerText || el.textContent || '').trim();
+                        const m = t.match(re);
+                        if (m) return parseInt(m[1], 10);
+                    }
+                    return 0;
+                }"""
+            )
+            return int(count) if count else None
+        except Exception:
+            return None
+
+    async def _collect_links_with_scroll(
+        self, page: Page, base_url: str, expected: int | None
+    ) -> dict[str, str]:
+        """Накопительный сбор ссылок: прокручиваем все скролл-контейнеры + window.
+
+        Возвращает dict {url: name}. На каждой итерации:
+          1. Читаем все детальные ссылки из DOM (по структуре URL).
+          2. Если набрали ≥ expected, выходим.
+          3. Прокручиваем каждый scrollable-контейнер на 80% его viewport вниз;
+             window.scrollBy на высоту окна.
+          4. Если за 3 итерации Set не вырос — выходим.
+        """
+        accumulator: dict[str, str] = {}
+        stable_iters = 0
+        max_iters = 60  # 60 * 800ms = 48s — лимит на лист
+
+        # Перед началом сбрасываем все скролл-контейнеры в верх
+        try:
+            await page.evaluate(
+                """() => {
+                    document.querySelectorAll('*').forEach(el => {
+                        const cs = window.getComputedStyle(el);
+                        const oy = cs.overflowY;
+                        if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) {
+                            el.scrollTop = 0;
+                        }
+                    });
+                    window.scrollTo(0, 0);
+                }"""
+            )
+        except Exception:
+            pass
+
+        for _ in range(max_iters):
+            # Шаг 1: читаем DOM, накапливаем ссылки
+            new_links = await self._extract_list_entries_from_dom(page, base_url)
+            grew = False
+            for ent in new_links:
+                u = ent.get("url")
+                n = ent.get("name") or ""
+                if not u:
+                    continue
+                if u not in accumulator:
+                    accumulator[u] = n
+                    grew = True
+                elif not accumulator[u] and n:
+                    accumulator[u] = n
+
+            # Если набрали достаточно — заканчиваем
+            if expected and len(accumulator) >= expected:
+                logger.debug(
+                    "MarketingScraper: набрано %d ссылок (≥ ожидаемого %d) — стоп",
+                    len(accumulator), expected,
+                )
+                break
+
+            # Стабилизация: 3 итерации без роста
+            if not grew:
+                stable_iters += 1
+                if stable_iters >= 3:
+                    break
+            else:
+                stable_iters = 0
+
+            # Шаг 2: прокручиваем все контейнеры + window
+            try:
+                done = await page.evaluate(
+                    """() => {
+                        let scrolled = 0;
+                        const containers = [];
+                        document.querySelectorAll('*').forEach(el => {
+                            const cs = window.getComputedStyle(el);
+                            const oy = cs.overflowY;
+                            if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 4) {
+                                containers.push(el);
+                            }
+                        });
+                        for (const el of containers) {
+                            const before = el.scrollTop;
+                            el.scrollTop = Math.min(
+                                el.scrollHeight - el.clientHeight,
+                                before + Math.max(200, el.clientHeight * 0.8)
+                            );
+                            if (el.scrollTop !== before) scrolled++;
+                        }
+                        // Также прокручиваем window
+                        const wBefore = window.scrollY;
+                        window.scrollBy(0, Math.max(400, window.innerHeight * 0.8));
+                        if (window.scrollY !== wBefore) scrolled++;
+                        return { scrolled, containers: containers.length };
+                    }"""
+                )
+                logger.debug(
+                    "MarketingScraper: прокрутка: контейнеров=%s, прокручено=%s",
+                    done.get("containers"), done.get("scrolled"),
+                )
+            except Exception as exc:
+                logger.debug("MarketingScraper: ошибка прокрутки: %s", exc)
+                break
+
+            await page.wait_for_timeout(700)
+
+        # Финальный проход — читаем DOM ещё раз, на случай если последняя прокрутка
+        # подгрузила что-то новое
+        for ent in await self._extract_list_entries_from_dom(page, base_url):
+            u = ent.get("url")
+            n = ent.get("name") or ""
+            if u and u not in accumulator:
+                accumulator[u] = n
+
+        return accumulator
+
+    async def _scroll_to_load_all(self, page: Page) -> None:
+        """Совместимость со старым кодом: одноразовая прокрутка всех контейнеров.
+
+        Используется только в местах, где нужно догрузить контент перед
+        каким-то действием. Основной сбор ссылок теперь идёт через
+        `_collect_links_with_scroll`.
+        """
+        try:
+            await page.evaluate(
+                """async () => {
+                    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                    const containers = [];
+                    document.querySelectorAll('*').forEach(el => {
+                        const cs = window.getComputedStyle(el);
+                        const oy = cs.overflowY;
+                        if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 4) {
+                            containers.push(el);
+                        }
+                    });
+                    for (let i = 0; i < 30; i++) {
+                        let moved = false;
+                        for (const el of containers) {
+                            const before = el.scrollTop;
+                            el.scrollTop = el.scrollHeight;
+                            if (el.scrollTop !== before) moved = true;
+                        }
+                        const wBefore = window.scrollY;
+                        window.scrollTo(0, document.body.scrollHeight);
+                        if (window.scrollY !== wBefore) moved = true;
+                        if (!moved) break;
+                        await sleep(400);
+                    }
+                }"""
+            )
+        except Exception:
+            pass
+
+    async def _log_zero_links_diagnostics(self, page: Page, base_url: str) -> None:
+        """Логирует структурную диагностику и сохраняет HTML страницы."""
         try:
             stats = await page.evaluate(
                 """() => {
-                    let anchors = [...document.querySelectorAll('a[href]')].map(a => a.href);
-                    let rows = document.querySelectorAll('tr, [role="row"]').length;
-                    let cards = document.querySelectorAll('[class*="card"], [class*="item"]').length;
+                    const anchors = [...document.querySelectorAll('a[href]')];
                     return {
                         anchors_count: anchors.length,
-                        anchors_sample: anchors.slice(0, 10),
-                        rows,
-                        cards,
+                        anchors_sample: anchors.slice(0, 15).map(a => a.href),
                         title: document.title,
                     };
                 }"""
             )
-            sample_urls = stats.get("anchors_sample", [])
             logger.warning(
-                "MarketingScraper: _collect_list_entries: 0 ссылок на %s | "
-                "anchors=%s, rows=%s, cards=%s, title=%r | sample_hrefs=%s",
-                base_url, stats.get("anchors_count"), stats.get("rows"),
-                stats.get("cards"), stats.get("title"),
-                sample_urls[:5],
+                "MarketingScraper: 0 ссылок на %s | anchors=%s, title=%r | sample_hrefs=%s",
+                base_url, stats.get("anchors_count"), stats.get("title"),
+                stats.get("anchors_sample", [])[:8],
             )
         except Exception:
-            logger.warning("MarketingScraper: _collect_list_entries: 0 ссылок на %s", base_url)
+            logger.warning("MarketingScraper: 0 ссылок на %s (диагностика недоступна)", base_url)
 
-        # Сохраняем HTML для диагностики
         try:
-            import os
             html_content = await page.content()
             html_path = os.path.join("data", "debug_page.html")
             os.makedirs("data", exist_ok=True)
@@ -480,270 +664,110 @@ class MarketingScraper:
         except Exception as exc:
             logger.debug("MarketingScraper: не удалось сохранить HTML: %s", exc)
 
-        return []
-
-    async def _scroll_to_load_all(self, page: Page) -> None:
-        """Скроллит страницу до конца, загружая все элементы виртуализированного списка.
-
-        Два критерия остановки:
-        1. Высота страницы перестала расти (обычные списки с пагинацией)
-        2. Количество кликабельных элементов перестало расти (виртуализированные списки,
-           где высота постоянна, но новые элементы подгружаются по мере скролла)
-        """
-        count_js = """() => document.querySelectorAll(
-            '[class*="card" i]:not([class*="header" i]):not([class*="footer" i]):not([class*="skeleton" i]):not([class*="placeholder" i]), ' +
-            '[class*="item" i]:not([class*="header" i]):not([class*="footer" i]):not([class*="skeleton" i]):not([class*="menu-item" i]):not([class*="nav" i]):not([class*="placeholder" i]), ' +
-            'tbody tr:not([class*="header" i]), ' +
-            '[role="row"]:not([role="columnheader"])'
-        ).length"""
-
-        prev_height = 0
-        prev_count = 0
-        stable_iters = 0
-        for _ in range(80):
-            try:
-                height = await page.evaluate("document.body.scrollHeight")
-                count = await page.evaluate(count_js)
-            except Exception:
-                break
-
-            if height == prev_height and count == prev_count:
-                stable_iters += 1
-                if stable_iters >= 3:
-                    break
-            else:
-                stable_iters = 0
-
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1_200)
-            prev_height = height
-            prev_count = count
-
-    async def _collect_list_entries_via_clicks(
-        self, page: Page, list_url: str
-    ) -> list[dict[str, str]]:
-        """Кликает по каждой кликабельной карточке, считает URL после навигации, возвращается.
-
-        Используется когда карточки кампаний — это `<div onClick=...>` без `<a href>`.
-        Результат: список {url, name}.
-        """
-        # Общий JS-селектор для карточек кампаний (используется и для индексации и для клика)
-        _CARD_SELECTOR = (
-            '[class*="card" i]:not([class*="header" i]):not([class*="footer" i])'
-            ':not([class*="skeleton" i]):not([class*="placeholder" i]), '
-            '[class*="item" i]:not([class*="header" i]):not([class*="footer" i])'
-            ':not([class*="skeleton" i]):not([class*="menu-item" i]):not([class*="nav" i])'
-            ':not([class*="placeholder" i]), '
-            'tbody tr:not([class*="header" i]), '
-            '[role="row"]:not([role="columnheader"])'
-        )
-
-        click_index_js = f"""() => {{
-            const sel = `{_CARD_SELECTOR}`;
-            const out = [];
-            const candidates = document.querySelectorAll(sel);
-            candidates.forEach((el, idx) => {{
-                if (el.closest('header, nav, aside, footer, [role="navigation"]')) return;
-                const text = (el.innerText || '').trim();
-                if (!text || text.length < 2) return;
-                // Пропускаем элементы явно скрытые (display:none)
-                if (window.getComputedStyle(el).display === 'none') return;
-                out.push({{ idx, name: text.split('\\n')[0].slice(0, 200) }});
-            }});
-            return out;
-        }}"""
-
-        candidates: list[dict] = await page.evaluate(click_index_js) or []
-        # Отсев кнопок «Скачать отчёт» и пр.
-        candidates = [c for c in candidates if not self._is_bad_entry_name(c.get("name", ""))]
-        candidates = candidates[:_MAX_CAMPAIGN_ENTRIES]
-
-        logger.info(
-            "MarketingScraper: click-fallback: найдено %d потенциальных карточек на %s",
-            len(candidates), list_url,
-        )
-
-        results: list[dict[str, str]] = []
-        seen_urls: set[str] = set()
-
-        # click_and_scroll_js должен использовать тот же порядок элементов что и click_index_js
-        click_and_scroll_js = f"""(targetIdx) => {{
-            const sel = `{_CARD_SELECTOR}`;
-            const candidates = document.querySelectorAll(sel);
-            let visibleIdx = 0;
-            for (const el of candidates) {{
-                if (el.closest('header, nav, aside, footer, [role="navigation"]')) continue;
-                const text = (el.innerText || '').trim();
-                if (!text || text.length < 2) continue;
-                if (window.getComputedStyle(el).display === 'none') continue;
-                if (visibleIdx === targetIdx) {{
-                    el.scrollIntoView({{ block: 'center' }});
-                    // Небольшая пауза после скролла чтобы элемент попал во viewport
-                    setTimeout(() => el.click(), 50);
-                    return true;
-                }}
-                visibleIdx++;
-            }}
-            return false;
-        }}"""
-
-        async def click_card(idx: int) -> str | None:
-            """Клик по idx-й карточке + ожидание смены URL (для SPA с pushState)."""
-            url_before = page.url
-            try:
-                clicked = await page.evaluate(click_and_scroll_js, idx)
-            except Exception as exc:
-                logger.debug("click_card eval(%d): %s", idx, exc)
-                return None
-            if not clicked:
-                return None
-            # Пауза для setTimeout(50ms) внутри JS
-            await page.wait_for_timeout(150)
-
-            # SPA с React Router использует pushState — обычный navigation event не работает.
-            # Ждём пока URL не сменится.
-            try:
-                await page.wait_for_function(
-                    "(prev) => location.href !== prev",
-                    arg=url_before,
-                    timeout=6_000,
-                )
-            except PlaywrightTimeoutError:
-                return None
-            except Exception as exc:
-                logger.debug("click_card wait_for_function(%d): %s", idx, exc)
-                return None
-
-            # Дождаться окончания загрузки нового маршрута
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=10_000)
-            except Exception:
-                pass
-
-            new_url = page.url
-            return new_url if new_url and new_url != url_before else None
-
-        for i, cand in enumerate(candidates):
-            try:
-                detail_url = await click_card(i)
-                if detail_url and detail_url not in seen_urls:
-                    seen_urls.add(detail_url)
-                    results.append({"url": detail_url, "name": cand.get("name", "") or detail_url})
-            except Exception as exc:
-                logger.debug("click_card(%d) failed: %s", i, exc)
-
-            # Возврат на listing
-            try:
-                if page.url != list_url:
-                    await page.goto(list_url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
-                    await page.wait_for_timeout(800)
-                    await self._scroll_to_load_all(page)
-            except Exception:
-                pass
-
-        return results
-
     async def _extract_list_entries_from_dom(
         self, page: Page, base_url: str
     ) -> list[dict[str, str]]:
-        """Извлечь ссылки и названия отдельных кампаний/акций из DOM.
+        """Извлечь ссылки и названия деталей кампаний/акций из текущего DOM.
 
-        Стратегия: сканируем все <a href> на странице, отбираем те,
-        которые ведут на ту же страницу-родителя, но НЕ являются ею.
-        Признак ссылки на детали кампании — путь содержит ID-сегмент
-        (число, UUID, длинный хэш). Навигация в шапке/сайдбаре исключается.
+        Концепция (устойчивая к смене классов):
+          - origin совпадает с базой;
+          - первый сегмент пути (раздел) совпадает с разделом базы;
+          - URL отличается от базы;
+          - последний сегмент пути — числовой ID или slug, НЕ служебное слово;
+          - ссылка НЕ внутри `<header>/<nav>/<aside>/<footer>` или `[role="navigation"]`.
+
+        Не зависит от точных имён классов Kaspi.
         """
         try:
             result = await page.evaluate(
-                """(baseUrl) => {
+                r"""(baseUrl) => {
                     const entries = [];
                     const seen = new Set();
-                    const rejected = { nav: 0, origin: 0, sameBase: 0, tooShort: 0, badSeg: 0, noName: 0 };
 
                     let baseObj;
-                    try { baseObj = new URL(baseUrl); } catch { return { entries: [], rejected, allHrefs: [] }; }
+                    try { baseObj = new URL(baseUrl); } catch { return { entries: [] }; }
                     const baseOrigin = baseObj.origin;
-                    const basePath = baseObj.pathname.replace(/\\/$/, '');
-
+                    const basePath = baseObj.pathname.replace(/\/$/, '');
                     const baseSegments = basePath.split('/').filter(Boolean);
                     const rootSegment = baseSegments[0] || '';
 
-                    // «Плохие» конечные сегменты — служебные страницы
+                    // Служебные сегменты — не детальные страницы
                     const badLastSegs = new Set([
                         'overview', 'settings', 'help', 'faq', 'support',
-                        'create', 'add', 'new', 'edit', 'reports', 'analytics',
+                        'create', 'add', 'new', 'edit', 'analytics',
+                        'list', 'campaigns', 'promotions', 'login',
+                        'auth', 'profile', 'account', 'csv', 'xlsx',
+                        'reports', 'report', 'export',
                     ]);
 
-                    // Явная навигация — только строгие теги, без [class*="menu"]
-                    const navSelector = 'header, nav, aside, footer, [role="navigation"], [class*="sidebar" i], [class*="navbar" i]';
+                    // Явная навигация — только теги, без класс-эвристик
+                    const navSelector = 'header, nav, aside, footer, [role="navigation"]';
 
-                    const allLinks = document.querySelectorAll('a[href]');
-                    const allHrefs = [...allLinks].slice(0, 20).map(a => a.href);
-
-                    allLinks.forEach(link => {
+                    document.querySelectorAll('a[href]').forEach(link => {
                         const href = link.href || '';
                         if (!href || !href.startsWith('http')) return;
 
                         let urlObj;
                         try { urlObj = new URL(href); } catch { return; }
-                        if (urlObj.origin !== baseOrigin) { rejected.origin++; return; }
+                        if (urlObj.origin !== baseOrigin) return;
 
-                        const path = urlObj.pathname.replace(/\\/$/, '');
-                        if (path === basePath) { rejected.sameBase++; return; }
+                        const path = urlObj.pathname.replace(/\/$/, '');
+                        if (path === basePath) return;
 
-                        // Должна быть в том же корневом разделе
-                        if (rootSegment && !path.startsWith('/' + rootSegment + '/')) { rejected.origin++; return; }
+                        // Отсекаем API/служебные пути целиком
+                        if (path.includes('/api/') || path.includes('/reports/') ||
+                            path.includes('/export/') || path.includes('/download')) return;
 
-                        // Путь должен быть не короче базового (равный путь OK — отличие в query/hash)
                         const pathSegs = path.split('/').filter(Boolean);
-                        if (pathSegs.length < baseSegments.length) { rejected.tooShort++; return; }
+                        if (pathSegs.length === 0) return;
 
-                        // Последний сегмент не должен быть служебным словом (только если путь длиннее базового)
-                        if (pathSegs.length > baseSegments.length) {
-                            const lastSeg = pathSegs[pathSegs.length - 1].toLowerCase();
-                            if (badLastSegs.has(lastSeg)) { rejected.badSeg++; return; }
-                        }
+                        // Раздел базы должен совпадать с разделом ссылки
+                        if (rootSegment && pathSegs[0] !== rootSegment) return;
+
+                        // Путь должен быть НЕ КОРОЧЕ базового. Если такой же длины —
+                        // это допустимо (например /promotions/list → /promotions/12345),
+                        // но последний сегмент уже отличается, иначе это та же база.
+                        if (pathSegs.length < baseSegments.length) return;
+
+                        // Последний сегмент не должен быть служебным словом
+                        const lastSeg = pathSegs[pathSegs.length - 1].toLowerCase();
+                        if (badLastSegs.has(lastSeg)) return;
+
+                        // Принимаем числовые ID, UUID-подобные хэши, slug длиной 2+.
+                        // Главный признак — это явно НЕ служебное слово.
+                        if (lastSeg.length < 1) return;
 
                         // Не из явной навигации
-                        if (link.closest(navSelector)) { rejected.nav++; return; }
+                        if (link.closest(navSelector)) return;
 
                         if (seen.has(href)) return;
                         seen.add(href);
 
-                        // Имя из ближайшей карточки/строки
-                        const row = link.closest(
-                            'tr, [role="row"], [class*="row"], [class*="item"], [class*="card"], li'
-                        );
-                        const nameEl = (
-                            (row && row.querySelector('[class*="name" i], [class*="title" i], [class*="campaign" i], [class*="promotion" i]')) ||
-                            (row && row.querySelector('td:first-child, [role="cell"]:first-child')) ||
-                            row ||
-                            link
-                        );
-                        const rawName = (nameEl.innerText || nameEl.textContent || '').trim();
-                        const name = rawName.replace(/\\s+/g, ' ').slice(0, 200);
-                        if (!name || name.length < 2) { rejected.noName++; return; }
+                        // Имя ищем приоритетно из самой ссылки, потом из ближайшей строки
+                        let name = (link.innerText || link.textContent || '').trim();
+                        if (!name || name.length < 2) {
+                            const row = link.closest(
+                                'tr, [role="row"], [class*="row" i], [class*="item" i], [class*="card" i], li'
+                            );
+                            if (row) {
+                                name = (row.innerText || row.textContent || '').trim().split('\n')[0];
+                            }
+                        }
+                        name = (name || '').replace(/\s+/g, ' ').slice(0, 200);
+                        if (!name || name.length < 2) return;
 
                         entries.push({ url: href, name });
                     });
 
-                    return { entries, rejected, allHrefs };
+                    return { entries };
                 }""",
                 base_url,
             )
             if not result:
                 return []
-            # Результат теперь объект {entries, rejected, allHrefs}
             if isinstance(result, dict):
-                entries = result.get("entries") or []
-                rejected = result.get("rejected", {})
-                all_hrefs = result.get("allHrefs", [])
-                logger.debug(
-                    "MarketingScraper: DOM-ссылки на %s: найдено=%d, отсеяно=%s, sample_hrefs=%s",
-                    base_url, len(entries), rejected, all_hrefs[:5],
-                )
-                return entries
-            return result  # fallback: старый формат
+                return result.get("entries") or []
+            return result
         except Exception as exc:
             logger.debug("MarketingScraper: ошибка DOM-извлечения ссылок: %s", exc)
             return []
@@ -1284,6 +1308,17 @@ class MarketingScraper:
 
     async def _download_marketing_report_by_click(self, page: Page) -> bytes | None:
         """Скачать отчёт: сначала по прямой ссылке `<a href>`, затем кликом по кнопке."""
+        # 0) Дождаться появления кнопки скачивания (Kaspi рендерит её асинхронно)
+        try:
+            await page.wait_for_selector(
+                "a[class*='share-button'], a[href*='/reports/'], "
+                "button:has-text('Скачать'), [aria-label*='Скачать' i]",
+                state="attached",
+                timeout=8_000,
+            )
+        except Exception:
+            pass  # не критично — продолжаем
+
         # 1) Прямая ссылка (например, иконочная кнопка m-share-button с href на XLSX)
         body = await self._download_report_via_link_href(page)
         if body:
