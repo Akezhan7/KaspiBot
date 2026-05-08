@@ -239,47 +239,72 @@ class AdsAnalyticsProcessor:
         performers.sort(key=lambda x: x["roas"], reverse=True)
         return performers[:limit]
 
-    async def get_no_bonus_products(self) -> list[dict]:
-        """Товары без активных бонусов из последнего скрапинга.
+    async def get_no_bonus_products(self, period_days: int = 30) -> list[dict]:
+        """Товары с рекламой, но без активного бонуса.
 
-        Обогащает SKU-список названиями и маркетинговыми метриками.
+        Логика:
+          1. Берём все SKU из ads_data WHERE source='kaspi_marketing' за период
+             (= товары, на которые тратили деньги).
+          2. Берём свежий статус бонусов из get_bonuses_status() (по каждому SKU
+             последняя запись из source='kaspi_bonus').
+          3. Возвращаем те SKU, у которых нет bonus_active=1 в свежем статусе.
+
         Returns список dict: sku, title, total_impressions, total_clicks, total_spend.
+        Сортировка по spend DESC — приоритет проблемных товаров.
         """
-        raw = await self._ads_db.get_products_without_bonuses()
-        result: list[dict] = []
+        marketing_rows = await self._ads_db.get_spend_revenue_summary(period_days=period_days)
+        bonus_rows = await self._ads_db.get_bonuses_status()
 
-        for item in raw:
-            title = await _resolve_title(item["product_sku"], self._products_db, self._ads_db)
-            marketing_rows = await self._ads_db.get_spend_revenue_summary(
-                period_days=30, sku=item["product_sku"]
-            )
-            marketing = marketing_rows[0] if marketing_rows else {}
+        active_bonus_skus: set[str] = {
+            row["product_sku"] for row in bonus_rows
+            if row.get("bonus_active") in (1, True)
+        }
+
+        result: list[dict] = []
+        for row in marketing_rows:
+            sku = row["product_sku"]
+            spend = float(row.get("total_spend") or 0)
+            if spend < _MIN_SPEND_THRESHOLD:
+                continue
+            if sku in active_bonus_skus:
+                continue
+
+            title = await _resolve_title(sku, self._products_db, self._ads_db)
             result.append(
                 {
-                    "sku": item["product_sku"],
+                    "sku": sku,
                     "title": title,
-                    "total_impressions": int(marketing.get("total_impressions") or 0) or None,
-                    "total_clicks": int(marketing.get("total_clicks") or 0) or None,
-                    "total_spend": round(float(marketing.get("total_spend") or 0), 2) or None,
+                    "total_impressions": int(row.get("total_impressions") or 0) or None,
+                    "total_clicks": int(row.get("total_clicks") or 0) or None,
+                    "total_spend": round(spend, 2),
                 }
             )
 
+        result.sort(key=lambda x: x["total_spend"] or 0, reverse=True)
         return result
 
     async def get_most_clickable(self, limit: int = 20) -> list[dict]:
         """Топ товаров по CTR с обогащением названиями из products.
 
+        Отбрасывает «технические» surrogate-SKU (RPT-XXXX) без читаемого названия:
+        от таких записей нет пользы — пользователь не сможет идентифицировать товар.
+
         Returns список dict: sku, title, avg_ctr, total_clicks,
                              total_impressions, total_spend.
         """
-        raw = await self._ads_db.get_most_clickable(limit=limit)
+        raw = await self._ads_db.get_most_clickable(limit=limit * 3)
         result: list[dict] = []
 
         for item in raw:
-            title = await _resolve_title(item["product_sku"], self._products_db, self._ads_db)
+            sku = item["product_sku"]
+            title = await _resolve_title(sku, self._products_db, self._ads_db)
+
+            if title == sku and sku.startswith("RPT-"):
+                continue
+
             result.append(
                 {
-                    "sku": item["product_sku"],
+                    "sku": sku,
                     "title": title,
                     "avg_ctr": round(float(item["avg_ctr"] or 0), 3),
                     "total_clicks": int(item["total_clicks"] or 0),
@@ -287,5 +312,7 @@ class AdsAnalyticsProcessor:
                     "total_spend": round(float(item["total_spend"] or 0), 2),
                 }
             )
+            if len(result) >= limit:
+                break
 
         return result

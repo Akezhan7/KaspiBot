@@ -1,6 +1,13 @@
 /**
  * ProductDetailPage — детальная карточка товара.
- * Метрики, тренды (линейный график), история CPC, статус бонуса.
+ *
+ * Парсинг работает только за последние KASPI_MARKETING_REPORT_DAYS (=7д),
+ * поэтому показываем фактически релевантные метрики:
+ *   - Расход, Показы, Клики, CTR, CPC
+ *   - Статус бонуса (активен / неактивен / нет данных)
+ *   - Тренды (clicks/spend/ctr) — за весь доступный период истории
+ *
+ * ROI/ROAS/Выручка скрыты — Kaspi не отдаёт revenue в выгрузках.
  */
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -19,8 +26,6 @@ import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
 import "../styles/pages.css";
 
-const TREND_PERIODS = [7, 14, 30] as const;
-
 export default function ProductDetailPage() {
   const { sku } = useParams<{ sku: string }>();
   const navigate = useNavigate();
@@ -30,7 +35,6 @@ export default function ProductDetailPage() {
   const [data, setData] = useState<ProductDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [trendDays, setTrendDays] = useState<7 | 14 | 30>(30);
 
   useEffect(() => {
     showBackButton(() => navigate("/products"));
@@ -41,27 +45,31 @@ export default function ProductDetailPage() {
     setLoading(true);
     setError(null);
     api
-      .getProduct(decodeURIComponent(sku), { period: 30, trend_days: trendDays })
+      .getProduct(decodeURIComponent(sku), { period: 30, trend_days: 30 })
       .then(setData)
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [api, sku, trendDays]);
+  }, [api, sku]);
 
   if (loading) return <div className="page-loader">Загрузка...</div>;
   if (error) return <div className="page-error">Ошибка: {error}</div>;
   if (!data) return null;
 
-  const { roi, roas, trends, latest_data } = data;
-  const roiPercent = roi?.roi_percent;
-  const roiClass = roiPercent == null ? "" : roiPercent >= 0 ? "roi-positive" : "roi-negative";
+  const latest = data.latest_data ?? {};
+  const spend = num(latest.spend) ?? num(data.roi?.spend);
+  const impressions = num(latest.impressions);
+  const clicks = num(latest.clicks);
+  const ctr = num(latest.ctr);
+  const cpc = num(latest.cpc);
 
-  const bonusActive = latest_data?.bonus_active === 1 || latest_data?.bonus_active === true;
-  const bonusPercent = latest_data?.bonus_percent as number | undefined;
+  const bonusActive =
+    latest.bonus_active === 1 || latest.bonus_active === true;
+  const bonusPercent = num(latest.bonus_percent);
+  const hasBonusData = latest.bonus_scraped_at != null;
 
-  // Форматирование дат для оси X
-  const chartData = trends.map((t) => ({
+  const chartData = data.trends.map((t) => ({
     ...t,
-    day: t.day.slice(5), // "MM-DD"
+    day: t.day.slice(5),
   }));
 
   return (
@@ -69,54 +77,48 @@ export default function ProductDetailPage() {
       <h1 className="page-title">{data.title ?? data.sku}</h1>
       <div className="sku-label">{data.sku}</div>
 
-      {/* Основные метрики */}
+      {/* Основные метрики из последнего скрапинга */}
       <div className="metrics-grid">
+        <MetricCard label="Расход" value={`${fmt(spend)} ₸`} />
+        <MetricCard label="Показы" value={fmt(impressions)} />
+        <MetricCard label="Клики" value={fmt(clicks)} />
         <MetricCard
-          label="Потрачено"
-          value={`${fmt(roi?.spend)} ₸`}
+          label="CTR"
+          value={ctr != null ? `${ctr.toFixed(2)}%` : "—"}
         />
         <MetricCard
-          label="Выручка"
-          value={`${fmt(roi?.revenue)} ₸`}
+          label="CPC"
+          value={cpc != null ? `${cpc.toFixed(0)} ₸` : "—"}
         />
-        <MetricCard
-          label="ROI"
-          value={roiPercent != null ? `${roiPercent.toFixed(1)}%` : "—"}
-          className={roiClass}
-        />
-        <MetricCard
-          label="ROAS"
-          value={roas != null ? roas.toFixed(2) : "—"}
-        />
+        {hasBonusData ? (
+          <MetricCard
+            label="Бонус"
+            value={bonusActive ? `${bonusPercent ?? 0}%` : "Нет"}
+            className={bonusActive ? "roi-positive" : "roi-negative"}
+          />
+        ) : (
+          <MetricCard label="Бонус" value="—" />
+        )}
       </div>
 
-      {/* Бонус */}
-      <div className={`bonus-badge ${bonusActive ? "bonus-active" : "bonus-inactive"}`}>
-        {bonusActive
-          ? `Бонус активен: ${bonusPercent ?? "—"}%`
-          : "Бонус не активен"}
-        <span className="bonus-icon-wrap">
-          {bonusActive ? <Gift size={14} /> : <CircleX size={14} />}
-        </span>
-      </div>
+      {/* Подробный бонус-бейдж */}
+      {hasBonusData && (
+        <div
+          className={`bonus-badge ${bonusActive ? "bonus-active" : "bonus-inactive"}`}
+        >
+          {bonusActive
+            ? `Бонус активен: ${bonusPercent ?? "—"}%`
+            : "Бонус не активен"}
+          <span className="bonus-icon-wrap">
+            {bonusActive ? <Gift size={14} /> : <CircleX size={14} />}
+          </span>
+        </div>
+      )}
 
-      {/* Выбор периода тренда */}
-      <div className="period-tabs">
-        {TREND_PERIODS.map((d) => (
-          <button
-            key={d}
-            className={`period-tab ${trendDays === d ? "active" : ""}`}
-            onClick={() => setTrendDays(d)}
-          >
-            {d}д
-          </button>
-        ))}
-      </div>
-
-      {/* График трендов */}
-      {chartData.length > 0 ? (
+      {/* График трендов: клики + расход */}
+      {chartData.length > 1 ? (
         <div className="chart-block">
-          <h3 className="chart-title">Тренды</h3>
+          <h3 className="chart-title">Динамика</h3>
           <ResponsiveContainer width="100%" height={180}>
             <LineChart data={chartData}>
               <XAxis dataKey="day" tick={{ fontSize: 10 }} />
@@ -126,28 +128,32 @@ export default function ProductDetailPage() {
               <Line
                 type="monotone"
                 dataKey="clicks"
-                stroke="var(--tg-theme-button-color, #2196f3)"
+                stroke="#0066ff"
+                strokeWidth={2}
                 dot={false}
                 name="Клики"
               />
               <Line
                 type="monotone"
                 dataKey="spend"
-                stroke="#f44336"
+                stroke="#dc2626"
+                strokeWidth={2}
                 dot={false}
-                name="Затраты ₸"
+                name="Расход ₸"
               />
             </LineChart>
           </ResponsiveContainer>
         </div>
       ) : (
-        <div className="empty-state">Нет данных для графика</div>
+        <div className="empty-state">
+          Динамика будет доступна, когда накопится несколько дней истории
+        </div>
       )}
 
-      {/* CTR тренд */}
-      {chartData.length > 0 && (
+      {/* CTR тренд — отдельно если данных хотя бы 2 точки */}
+      {chartData.length > 1 && (
         <div className="chart-block">
-          <h3 className="chart-title">CTR (%)</h3>
+          <h3 className="chart-title">CTR по дням</h3>
           <ResponsiveContainer width="100%" height={120}>
             <LineChart data={chartData}>
               <XAxis dataKey="day" tick={{ fontSize: 10 }} />
@@ -156,7 +162,8 @@ export default function ProductDetailPage() {
               <Line
                 type="monotone"
                 dataKey="ctr"
-                stroke="#4caf50"
+                stroke="#16a34a"
+                strokeWidth={2}
                 dot={false}
                 name="CTR%"
               />
@@ -183,6 +190,12 @@ function MetricCard({
       <div className="metric-label">{label}</div>
     </div>
   );
+}
+
+function num(v: unknown): number | null {
+  if (v == null) return null;
+  const n = typeof v === "number" ? v : parseFloat(String(v));
+  return Number.isFinite(n) ? n : null;
 }
 
 function fmt(v: number | undefined | null): string {

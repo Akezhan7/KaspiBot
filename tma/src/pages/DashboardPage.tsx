@@ -1,6 +1,8 @@
 /**
  * Dashboard — главная страница TMA.
  * Показывает сводные метрики, сигналы и навигацию.
+ * Вкладки скрываются, если по ним нет данных (top-performers, wasted-budget,
+ * no-bonus, most-clickable) — чтобы пользователь не тыкал в пустоту.
  */
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -11,11 +13,24 @@ import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
 import "../styles/pages.css";
 
+interface Counts {
+  topPerformers: number;
+  wastedBudget: number;
+  noBonus: number;
+  mostClickable: number;
+}
+
 export default function DashboardPage() {
   const navigate = useNavigate();
   const api = useApi();
   const { hideBackButton } = useTelegram();
   const [data, setData] = useState<DashboardResponse | null>(null);
+  const [counts, setCounts] = useState<Counts>({
+    topPerformers: 0,
+    wastedBudget: 0,
+    noBonus: 0,
+    mostClickable: 0,
+  });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(false);
@@ -26,9 +41,23 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!api) return;
-    api
-      .getDashboard()
-      .then(setData)
+
+    Promise.all([
+      api.getDashboard(),
+      api.getTopPerformers(1).catch(() => ({ count: 0, items: [] })),
+      api.getWastedBudget(0).catch(() => ({ count: 0, items: [], threshold: 0 })),
+      api.getNoBonusProducts().catch(() => ({ count: 0, items: [] })),
+      api.getMostClickable(1).catch(() => ({ count: 0, items: [] })),
+    ])
+      .then(([dash, tp, wb, nb, mc]) => {
+        setData(dash);
+        setCounts({
+          topPerformers: tp.count ?? tp.items?.length ?? 0,
+          wastedBudget: wb.count ?? wb.items?.length ?? 0,
+          noBonus: nb.count ?? nb.items?.length ?? 0,
+          mostClickable: mc.count ?? mc.items?.length ?? 0,
+        });
+      })
       .catch((err: ApiError | Error) => setError(err.message))
       .finally(() => setLoading(false));
   }, [api]);
@@ -61,7 +90,7 @@ export default function DashboardPage() {
     <div className="page">
       <h1 className="page-title">Kaspi Ads</h1>
 
-      {/* Алерты */}
+      {/* Алерты — только если в них есть смысл */}
       {alerts.length > 0 && (
         <div className="alerts-block">
           {alerts.map((a, i) => (
@@ -117,16 +146,39 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Навигация */}
+      {/* Навигация — пустые разделы скрываем */}
       <div className="nav-links">
         <NavItem label="Все товары" onClick={() => navigate("/products")} />
-        <NavItem label="Топ исполнители" onClick={() => navigate("/top-performers")} />
-        <NavItem label="Слив бюджета" onClick={() => navigate("/wasted-budget")} />
-        <NavItem label="Без бонусов" onClick={() => navigate("/no-bonus")} />
-        <NavItem label="Кликабельные" onClick={() => navigate("/most-clickable")} />
+        {counts.mostClickable > 0 && (
+          <NavItem
+            label="Кликабельные"
+            badge={counts.mostClickable}
+            onClick={() => navigate("/most-clickable")}
+          />
+        )}
+        {counts.noBonus > 0 && (
+          <NavItem
+            label="Без бонусов"
+            badge={counts.noBonus}
+            onClick={() => navigate("/no-bonus")}
+          />
+        )}
+        {counts.topPerformers > 0 && (
+          <NavItem
+            label="Топ исполнители"
+            badge={counts.topPerformers}
+            onClick={() => navigate("/top-performers")}
+          />
+        )}
+        {counts.wastedBudget > 0 && (
+          <NavItem
+            label="Слив бюджета"
+            badge={counts.wastedBudget}
+            onClick={() => navigate("/wasted-budget")}
+          />
+        )}
       </div>
 
-      {/* Кнопка запуска скрапинга */}
       <button
         className="btn btn-secondary"
         onClick={handleTriggerScrape}
@@ -147,10 +199,19 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
-function NavItem({ label, onClick }: { label: string; onClick: () => void }) {
+function NavItem({
+  label,
+  badge,
+  onClick,
+}: {
+  label: string;
+  badge?: number;
+  onClick: () => void;
+}) {
   return (
     <button className="nav-item" onClick={onClick}>
       <span className="nav-label">{label}</span>
+      {badge != null && badge > 0 && <span className="nav-badge">{badge}</span>}
       <span className="nav-arrow">›</span>
     </button>
   );
