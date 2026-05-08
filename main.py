@@ -226,6 +226,23 @@ async def on_startup():
         if _synced > 0:
             logger.info("Синхронизировано %d товаров из серверной БД", _synced)
 
+    # Установить Menu Button → WebApp (если TMA_URL задан)
+    tma_url = Config.TMA_URL.strip() if Config.TMA_URL else ""
+    if tma_url:
+        try:
+            from aiogram.types import MenuButtonWebApp, WebAppInfo
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Аналитика",
+                    web_app=WebAppInfo(url=tma_url),
+                )
+            )
+            logger.info("Menu Button → WebApp установлен: %s", tma_url)
+        except Exception as e:
+            logger.warning("Не удалось установить Menu Button: %s", e)
+    else:
+        logger.info("TMA_URL не задан — Menu Button не установлен")
+
     # Уведомление админов о запуске
     await notification_service.send_to_admins(
         "<b>Бот запущен</b>\n\n"
