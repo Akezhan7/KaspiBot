@@ -4,25 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>Kaspi Ads Analytics</title>
-    <script>
-      window.addEventListener('error', function(e) {
-        var r = document.getElementById('root');
-        if (r) r.innerHTML = '<div style="padding:16px;font-family:monospace;font-size:12px;color:#c00;white-space:pre-wrap;background:#fff"><b>JS Error:</b>\n' + e.message + '\n' + (e.filename||'') + ':' + e.lineno + '\n\n' + (e.error && e.error.stack ? e.error.stack : '') + '</div>';
-      });
-      window.addEventListener('unhandledrejection', function(e) {
-        var r = document.getElementById('root');
-        if (r && r.querySelector('.tma-loading')) r.innerHTML = '<div style="padding:16px;font-family:monospace;font-size:12px;color:#c00;white-space:pre-wrap;background:#fff"><b>Promise Error:</b>\n' + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason)) + '</div>';
-      });
-    </script>
     <!-- Telegram WebApp SDK -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script type="module" crossorigin src="/tma/assets/index-B389M3ao.js"></script>
+    <script type="module" crossorigin src="/tma/assets/index-Gm3CeoVu.js"></script>
     <link rel="modulepreload" crossorigin href="/tma/assets/rolldown-runtime-S-ySWqyJ.js">
     <link rel="modulepreload" crossorigin href="/tma/assets/charts-BVJkl8zb.js">
     <link rel="modulepreload" crossorigin href="/tma/assets/vendor-BNUBZxc1.js">
-    <link rel="stylesheet" crossorigin href="/tma/assets/index-Bwdu2Vry.css">
+    <link rel="stylesheet" crossorigin href="/tma/assets/index-DTLv7b8H.css">
   </head>
   <body>
-    <div id="root"><div class="tma-loading" style="padding:16px;font-family:sans-serif;color:#555;font-size:14px">Загрузка TMA...</div></div>
+    <div id="root"></div>
   </body>
 </html>
