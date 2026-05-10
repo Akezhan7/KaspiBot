@@ -188,6 +188,28 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_ads_data_sku_date_source ON ads_data(product_sku, date(scraped_at), source)",
         ],
     ),
+    (
+        6,
+        "ads_data: period_days column + расширенный уникальный ключ под двойную выгрузку",
+        [
+            # Колонка периода отчёта в днях. Старые записи получают 7 (=значение по умолчанию).
+            "ALTER TABLE ads_data ADD COLUMN period_days INTEGER NOT NULL DEFAULT 7",
+            # Бэкфилл из period_start/period_end если они заполнены.
+            """
+            UPDATE ads_data
+               SET period_days = CAST(julianday(period_end) - julianday(period_start) + 1 AS INTEGER)
+             WHERE period_start IS NOT NULL
+               AND period_end IS NOT NULL
+               AND CAST(julianday(period_end) - julianday(period_start) + 1 AS INTEGER) > 0
+            """,
+            # Старый уникальный индекс удаляем — теперь period_days участвует в ключе.
+            "DROP INDEX IF EXISTS idx_ads_data_sku_date_source",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_ads_data_sku_date_source_period "
+            "ON ads_data(product_sku, date(scraped_at), source, period_days)",
+            # Индекс для быстрого фильтра по периоду в SELECT-ах.
+            "CREATE INDEX IF NOT EXISTS idx_ads_data_period ON ads_data(period_days)",
+        ],
+    ),
 ]
 
 

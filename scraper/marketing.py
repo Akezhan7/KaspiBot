@@ -806,13 +806,28 @@ class MarketingScraper:
             return []
 
     async def _scrape_entry_products_marketing(
-        self, page: Page, entry: dict[str, str], source: str
+        self,
+        page: Page,
+        entry: dict[str, str],
+        source: str,
+        periods: list[int] | None = None,
     ) -> list[AdCampaignData]:
-        """Зайти на страницу кампании, скачать XLSX, вернуть список AdCampaignData.
+        """Зайти на страницу кампании, скачать XLSX за КАЖДЫЙ период, вернуть товары.
 
-        НЕ ждём таблицу: на детальной странице кампании может не быть таблицы товаров,
-        но есть кнопка «Скачать отчёт» — её мы и пытаемся нажать.
+        Args:
+            page: текущая страница Playwright.
+            entry: словарь со ссылкой на кампанию (`url`, `name`).
+            source: значение колонки ads_data.source (kaspi_marketing /
+                kaspi_external_ads).
+            periods: список периодов отчёта в днях (например, [7, 30]).
+                Каждой записи проставляется period_days = соответствующий
+                период. Если None — берём дефолт из конфига.
+
+        НЕ ждём таблицу: на детальной странице кампании может не быть таблицы
+        товаров, но есть кнопка «Скачать отчёт» — её мы и пытаемся нажать.
         """
+        report_periods = periods or list(Config.KASPI_MARKETING_REPORT_PERIODS)
+
         await page.goto(entry["url"], wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
         await self._random_delay()
         # Дождаться появления интерактивных элементов (кнопок), без требования таблицы
@@ -822,24 +837,34 @@ class MarketingScraper:
             pass
 
         campaign_name = entry.get("name", "")
+        result: list[AdCampaignData] = []
 
-        payload = await self._download_marketing_report_by_click(page)
-        if not payload:
-            return []
+        for days in report_periods:
+            payload = await self._download_marketing_report_by_click(page, days)
+            if not payload:
+                continue
 
-        rows = await self._parse_marketing_report_payload(payload, page, depth=0)
-        if not rows:
-            return []
+            rows = await self._parse_marketing_report_payload(payload, page, depth=0)
+            if not rows:
+                continue
 
-        for r in rows:
-            r.source = source
-            r._campaign_name = campaign_name  # type: ignore[attr-defined]
-        return rows
+            for r in rows:
+                r.source = source
+                r.period_days = days
+                r._campaign_name = campaign_name  # type: ignore[attr-defined]
+            result.extend(rows)
+
+        return result
 
     async def _scrape_entry_products_bonus(
-        self, page: Page, entry: dict[str, str]
+        self,
+        page: Page,
+        entry: dict[str, str],
+        periods: list[int] | None = None,
     ) -> list[BonusData]:
-        """Зайти на страницу акции, скачать XLSX, вернуть список BonusData."""
+        """Зайти на страницу акции, скачать XLSX за каждый период, вернуть товары."""
+        report_periods = periods or list(Config.KASPI_MARKETING_REPORT_PERIODS)
+
         await page.goto(entry["url"], wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
         await self._random_delay()
         try:
@@ -847,36 +872,47 @@ class MarketingScraper:
         except Exception:
             pass
 
-        payload = await self._download_marketing_report_by_click(page)
-        if not payload:
-            return []
+        result: list[BonusData] = []
 
-        # Сначала бонусный парсер (статус + %)
-        rows = await self._parse_bonus_report_payload(payload, page, depth=0)
-        if rows:
-            return rows
-        # Иначе — формат маркетинга, конвертируем
-        ad_rows = await self._parse_marketing_report_payload(payload, page, depth=0)
-        if ad_rows:
-            return [
-                BonusData(
-                    product_sku=r.product_sku,
-                    product_name=r.product_name,
-                    bonus_active=True,
-                    bonus_percent=0.0,
-                    source="kaspi_bonus",
-                )
-                for r in ad_rows
-            ]
-        return []
+        for days in report_periods:
+            payload = await self._download_marketing_report_by_click(page, days)
+            if not payload:
+                continue
+
+            # Сначала бонусный парсер (статус + %)
+            rows = await self._parse_bonus_report_payload(payload, page, depth=0)
+            if rows:
+                for r in rows:
+                    r.period_days = days
+                result.extend(rows)
+                continue
+
+            # Иначе — формат маркетинга, конвертируем
+            ad_rows = await self._parse_marketing_report_payload(payload, page, depth=0)
+            if ad_rows:
+                for r in ad_rows:
+                    result.append(
+                        BonusData(
+                            product_sku=r.product_sku,
+                            product_name=r.product_name,
+                            bonus_active=True,
+                            bonus_percent=0.0,
+                            source="kaspi_bonus",
+                            period_days=days,
+                        )
+                    )
+
+        return result
 
     # -------------------------------------------------------------------------
     # Вспомогательные методы
     # -------------------------------------------------------------------------
 
-    async def _collect_marketing_from_report(self, page: Page) -> list[AdCampaignData]:
+    async def _collect_marketing_from_report(
+        self, page: Page, days: int | None = None
+    ) -> list[AdCampaignData]:
         """Скачать и распарсить маркетинговый xlsx-отчёт с текущей страницы."""
-        report_url = await self._extract_marketing_report_url(page)
+        report_url = await self._extract_marketing_report_url(page, days)
         if report_url:
             try:
                 response = await self._context.request.get(report_url, timeout=_PAGE_LOAD_TIMEOUT)
@@ -897,7 +933,7 @@ class MarketingScraper:
         else:
             logger.info("MarketingScraper: ссылка на xlsx-отчёт не найдена на %s", page.url)
 
-        payload = await self._download_marketing_report_by_click(page)
+        payload = await self._download_marketing_report_by_click(page, days)
         if not payload:
             return []
 
@@ -906,7 +942,7 @@ class MarketingScraper:
             if not rows:
                 # Иногда после клика URL отчёта появляется в HTML/скриптах страницы чуть позже.
                 await page.wait_for_timeout(1_000)
-                delayed_report_url = await self._extract_marketing_report_url(page)
+                delayed_report_url = await self._extract_marketing_report_url(page, days)
                 if delayed_report_url:
                     try:
                         delayed_response = await self._context.request.get(
@@ -937,9 +973,11 @@ class MarketingScraper:
             logger.warning("MarketingScraper: ошибка парсинга отчёта после клика: %s", e)
             return []
 
-    async def _collect_bonuses_from_report(self, page: Page) -> list[BonusData]:
+    async def _collect_bonuses_from_report(
+        self, page: Page, days: int | None = None
+    ) -> list[BonusData]:
         """Скачать и распарсить бонусный отчёт (если доступен) с текущей страницы."""
-        report_url = await self._extract_any_report_url_from_html(page)
+        report_url = await self._extract_any_report_url_from_html(page, days)
         if report_url:
             try:
                 response = await self._context.request.get(report_url, timeout=_PAGE_LOAD_TIMEOUT)
@@ -957,7 +995,7 @@ class MarketingScraper:
             except Exception as e:
                 logger.debug("MarketingScraper: ошибка загрузки бонусного отчёта по URL: %s", e)
 
-        payload = await self._download_marketing_report_by_click(page)
+        payload = await self._download_marketing_report_by_click(page, days)
         if not payload:
             return []
 
@@ -1009,7 +1047,9 @@ class MarketingScraper:
 
         return self._parse_bonus_csv(text)
 
-    async def _extract_any_report_url_from_html(self, page: Page) -> str | None:
+    async def _extract_any_report_url_from_html(
+        self, page: Page, days: int | None = None
+    ) -> str | None:
         """Найти URL отчёта (xlsx/csv) в HTML страницы."""
         try:
             html_content = await page.content()
@@ -1017,15 +1057,18 @@ class MarketingScraper:
             logger.debug("MarketingScraper: не удалось получить HTML страницы для report-url: %s", e)
             return None
 
-        return self._extract_any_report_url_from_text(html_content)
+        return self._extract_any_report_url_from_text(html_content, days)
 
-    def _extract_any_report_url_from_text(self, text: str) -> str | None:
+    def _extract_any_report_url_from_text(
+        self, text: str, days: int | None = None
+    ) -> str | None:
         """Найти любой URL отчёта (xlsx/csv) в текстовом payload/HTML."""
         normalized = html.unescape(text).replace("\\/", "/")
         match = _GENERIC_REPORT_URL_PATTERN.search(normalized)
         if not match:
             return None
-        return urljoin(_CANONICAL_MARKETING_PRODUCTS_URL, match.group(0))
+        url = urljoin(_CANONICAL_MARKETING_PRODUCTS_URL, match.group(0))
+        return self._apply_report_period(url, days)
 
     def _parse_bonus_xlsx(self, payload: bytes) -> list[BonusData]:
         """Распарсить xlsx-отчёт бонусов."""
@@ -1259,7 +1302,9 @@ class MarketingScraper:
 
         return campaigns
 
-    async def _extract_marketing_report_url(self, page: Page) -> str | None:
+    async def _extract_marketing_report_url(
+        self, page: Page, days: int | None = None
+    ) -> str | None:
         """Извлечь URL xlsx-отчёта из HTML страницы (без клика по кнопке)."""
         try:
             html_content = await page.content()
@@ -1274,14 +1319,21 @@ class MarketingScraper:
 
         raw_url = html.unescape(match.group(0))
         full_url = urljoin(page.url, raw_url)
-        return self._apply_report_period(full_url)
+        return self._apply_report_period(full_url, days)
 
-    async def _download_report_via_link_href(self, page: Page) -> bytes | None:
+    async def _download_report_via_link_href(
+        self, page: Page, days: int | None = None
+    ) -> bytes | None:
         """Скачать отчёт по прямой ссылке `<a href>` с URL XLSX/CSV.
 
         Покрывает кейс, когда на странице есть `<a class="m-share-button" href="...report/xlsx">`
         с иконкой загрузки (без текста). На страницах бонусов за отзывы у Kaspi
         именно такая структура.
+
+        Args:
+            page: текущая страница Playwright.
+            days: длина периода отчёта (используется для подмены startDate/endDate
+                в href). None = брать значение из KASPI_MARKETING_REPORT_DAYS.
         """
         try:
             href_list: list[str] = await page.evaluate(
@@ -1319,7 +1371,7 @@ class MarketingScraper:
             return None
 
         for raw_href in unique_hrefs:
-            url = self._apply_report_period(raw_href)
+            url = self._apply_report_period(raw_href, days)
             try:
                 response = await self._context.request.get(url, timeout=_PAGE_LOAD_TIMEOUT)
                 if not response.ok:
@@ -1339,8 +1391,16 @@ class MarketingScraper:
                 logger.debug("MarketingScraper: ошибка загрузки %s: %s", url, exc)
         return None
 
-    async def _download_marketing_report_by_click(self, page: Page) -> bytes | None:
-        """Скачать отчёт: сначала по прямой ссылке `<a href>`, затем кликом по кнопке."""
+    async def _download_marketing_report_by_click(
+        self, page: Page, days: int | None = None
+    ) -> bytes | None:
+        """Скачать отчёт: сначала по прямой ссылке `<a href>`, затем кликом по кнопке.
+
+        Если `days` указан — отчёт скачивается за `days` дней через подмену
+        startDate/endDate в href-ссылке (доступно для всех страниц Kaspi
+        Marketing, где есть `<a class="m-share-button">`). Fallback по клику
+        кнопки скачает отчёт за период, выбранный в UI (по умолчанию 7 дней).
+        """
         # 0) Дождаться появления кнопки скачивания (Kaspi рендерит её асинхронно)
         try:
             await page.wait_for_selector(
@@ -1353,9 +1413,20 @@ class MarketingScraper:
             pass  # не критично — продолжаем
 
         # 1) Прямая ссылка (например, иконочная кнопка m-share-button с href на XLSX)
-        body = await self._download_report_via_link_href(page)
+        body = await self._download_report_via_link_href(page, days)
         if body:
             return body
+
+        # Fallback на клик кнопки даём только для дефолтного 7-дневного периода:
+        # клик не управляет периодом отчёта (он берётся из UI, по умолчанию 7д).
+        # Для 30-дневной выгрузки лучше пропустить отчёт, чем подменить его 7д-данными.
+        if days is not None and int(days) != int(Config.KASPI_MARKETING_REPORT_DAYS):
+            logger.info(
+                "MarketingScraper: прямая ссылка для %sд не найдена; "
+                "клик-fallback пропускаем (период не подменяется через UI)",
+                days,
+            )
+            return None
 
         # 2) Кликабельные кнопки с текстом
         selectors = [
@@ -1442,16 +1513,22 @@ class MarketingScraper:
         logger.warning("MarketingScraper: скачать отчёт через кнопку не удалось")
         return None
 
-    def _apply_report_period(self, report_url: str) -> str:
-        """Подменить период отчёта в URL согласно KASPI_MARKETING_REPORT_DAYS."""
-        days = max(1, int(Config.KASPI_MARKETING_REPORT_DAYS))
+    def _apply_report_period(self, report_url: str, days: int | None = None) -> str:
+        """Подменить период отчёта в URL.
+
+        Args:
+            report_url: исходный URL XLSX-отчёта.
+            days: длина периода в днях. Если None — берём KASPI_MARKETING_REPORT_DAYS
+                (для совместимости со старым кодом, который не передаёт days).
+        """
+        effective_days = max(1, int(days if days is not None else Config.KASPI_MARKETING_REPORT_DAYS))
 
         try:
             parts = urlsplit(report_url)
             query = parse_qs(parts.query, keep_blank_values=True)
 
             end_date = now_kz().date()
-            start_date = end_date - timedelta(days=days - 1)
+            start_date = end_date - timedelta(days=effective_days - 1)
 
             query["startDate"] = [start_date.isoformat()]
             query["endDate"] = [end_date.isoformat()]
@@ -1460,7 +1537,7 @@ class MarketingScraper:
             updated = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
             logger.info(
                 "MarketingScraper: период отчёта применён: %s дней (%s..%s)",
-                days,
+                effective_days,
                 start_date,
                 end_date,
             )

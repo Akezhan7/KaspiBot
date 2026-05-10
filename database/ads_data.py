@@ -26,8 +26,8 @@ class AdsDataDB:
         INSERT OR REPLACE INTO ads_data
             (product_sku, product_name, scraped_at, period_start, period_end, source,
              impressions, clicks, ctr, spend, cpc,
-             orders, revenue, bonus_active, bonus_percent, raw_data)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             orders, revenue, bonus_active, bonus_percent, raw_data, period_days)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     @staticmethod
@@ -49,6 +49,7 @@ class AdsDataDB:
             d.get("bonus_active", 0),
             d.get("bonus_percent", 0),
             json.dumps(d.get("raw_data")) if d.get("raw_data") else None,
+            int(d.get("period_days") or 7),
         )
 
     async def save_campaign(self, data: dict) -> int:
@@ -67,16 +68,27 @@ class AdsDataDB:
             await db.commit()
         return len(items)
 
-    async def get_latest_by_sku(self, sku: str, source: str | None = None) -> dict | None:
+    async def get_latest_by_sku(
+        self,
+        sku: str,
+        source: str | None = None,
+        report_period: int | None = None,
+    ) -> dict | None:
         """Последняя запись для данного SKU.
 
-        Если указан source, выбирается последняя запись только по этому источнику.
+        Args:
+            sku: артикул товара.
+            source: фильтр по колонке source (опционально).
+            report_period: фильтр по period_days (7 или 30). None = любой.
         """
         query = "SELECT * FROM ads_data WHERE product_sku = ?"
         params: list[Any] = [sku]
         if source:
             query += " AND source = ?"
             params.append(source)
+        if report_period is not None:
+            query += " AND period_days = ?"
+            params.append(report_period)
         query += " ORDER BY scraped_at DESC, id DESC LIMIT 1"
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -234,6 +246,7 @@ class AdsDataDB:
         period_days: int = 30,
         require_active_bonus: bool = False,
         require_spend: bool = False,
+        report_period: int | None = None,
     ) -> set[str]:
         """SKU, по которым есть свежие активные записи указанного источника.
 
@@ -241,11 +254,13 @@ class AdsDataDB:
             source: значение колонки `ads_data.source`
                 (`kaspi_marketing`, `kaspi_external_ads`, `kaspi_bonus_seller`,
                  `kaspi_bonus_review`, `kaspi_bonus`).
-            period_days: глубина истории в днях.
+            period_days: глубина истории в днях (фильтр по scraped_at).
             require_active_bonus: True для бонусных источников — учитывать
                 только записи с `bonus_active = 1`.
             require_spend: True для рекламных источников — учитывать только
                 записи с `spend > 0` (= реклама реально крутилась).
+            report_period: фильтр по period_days (7 или 30). None = любой
+                report-период (берёт самые свежие данные независимо от выгрузки).
 
         Returns:
             Множество SKU. Используется для фильтров «есть/нет реклама/бонус».
@@ -260,6 +275,9 @@ class AdsDataDB:
             conditions.append("bonus_active = 1")
         if require_spend:
             conditions.append("spend > 0")
+        if report_period is not None:
+            conditions.append("period_days = ?")
+            params.append(report_period)
 
         where = " AND ".join(conditions)
         query = f"""
@@ -276,17 +294,26 @@ class AdsDataDB:
         self,
         period_days: int = 30,
         sku: str | None = None,
+        report_period: int | None = None,
     ) -> list[dict]:
         """Агрегированные spend/revenue/clicks/impressions по SKU за период.
 
-        Используется для расчёта ROI и ROAS в аналитическом процессоре.
+        Args:
+            period_days: глубина истории в днях (фильтр по scraped_at).
+            sku: ограничить выборку одним SKU.
+            report_period: фильтр по period_days (7 или 30). None = берём
+                свежайшую запись каждого дня независимо от report-периода.
+
         Возвращает: product_sku, total_spend, total_revenue, total_clicks,
                     total_impressions, total_orders, avg_ctr, avg_cpc
         """
         sku_filter = "AND product_sku = ?" if sku else ""
+        report_filter = "AND period_days = ?" if report_period is not None else ""
         params: list[Any] = [f"-{period_days}"]
         if sku:
             params.append(sku)
+        if report_period is not None:
+            params.append(report_period)
 
         # Дедупликация: берём только последнюю строку за каждый (sku, день) чтобы исключить
         # задвоение при повторных запусках скрапера в один день.
@@ -301,6 +328,7 @@ class AdsDataDB:
                 WHERE source = 'kaspi_marketing'
                   AND scraped_at >= datetime('now', ? || ' days')
                   {sku_filter}
+                  {report_filter}
             )
             SELECT product_sku,
                    SUM(spend)       AS total_spend,

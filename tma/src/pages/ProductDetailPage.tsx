@@ -26,10 +26,22 @@ import type {
   AdsSection,
   BonusSection,
   ProductDetailResponse,
+  ReportPeriod,
 } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
 import "../styles/pages.css";
+
+const REPORT_PERIOD_STORAGE_KEY = "kaspibot.reportPeriod";
+
+function readReportPeriod(): ReportPeriod {
+  try {
+    const v = Number(localStorage.getItem(REPORT_PERIOD_STORAGE_KEY));
+    return v === 30 ? 30 : 7;
+  } catch {
+    return 7;
+  }
+}
 
 export default function ProductDetailPage() {
   const { sku } = useParams<{ sku: string }>();
@@ -49,8 +61,13 @@ export default function ProductDetailPage() {
     if (!api || !sku) return;
     setLoading(true);
     setError(null);
+    const reportPeriod = readReportPeriod();
     api
-      .getProduct(decodeURIComponent(sku), { period: 30, trend_days: 30 })
+      .getProduct(decodeURIComponent(sku), {
+        period: 30,
+        trend_days: 30,
+        report_period: reportPeriod,
+      })
       .then(setData)
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoading(false));

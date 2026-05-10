@@ -12,7 +12,12 @@
  */
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import type { MissingFilter, ProductItem, ProductsQuery } from "../api/client";
+import type {
+  MissingFilter,
+  ProductItem,
+  ProductsQuery,
+  ReportPeriod,
+} from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
 import "../styles/pages.css";
@@ -41,6 +46,14 @@ function isMissingFilter(v: string | null): v is MissingFilter {
   return v != null && VALID_MISSING.includes(v as MissingFilter);
 }
 
+const REPORT_PERIODS: ReportPeriod[] = [7, 30];
+const REPORT_PERIOD_STORAGE_KEY = "kaspibot.reportPeriod";
+
+function parseReportPeriod(v: string | null): ReportPeriod {
+  const n = Number(v);
+  return REPORT_PERIODS.includes(n as ReportPeriod) ? (n as ReportPeriod) : 7;
+}
+
 export default function ProductsPage() {
   const navigate = useNavigate();
   const api = useApi();
@@ -56,12 +69,22 @@ export default function ProductsPage() {
   const offset = Number(params.get("offset") ?? 0) || 0;
   const queryFromUrl = params.get("q") ?? "";
 
+  // Период отчёта: URL → localStorage → 7. Сохраняется обратно в localStorage,
+  // чтобы пользователю не приходилось каждый раз выбирать вручную.
+  const reportPeriod: ReportPeriod = parseReportPeriod(
+    params.get("report_period")
+      ?? (typeof window !== "undefined"
+        ? localStorage.getItem(REPORT_PERIOD_STORAGE_KEY)
+        : null),
+  );
+
   const [items, setItems] = useState<ProductItem[]>([]);
   const [total, setTotal] = useState(0);
   const [query, setQuery] = useState(queryFromUrl);
   const [debouncedQuery, setDebouncedQuery] = useState(queryFromUrl);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     showBackButton(() => navigate("/"));
@@ -92,17 +115,29 @@ export default function ProductsPage() {
     [params, setParams],
   );
 
+  const buildQuery = useCallback(
+    (override?: Partial<ProductsQuery>): ProductsQuery => {
+      const q: ProductsQuery = {
+        sort,
+        limit: PAGE_SIZE,
+        offset,
+        period: 30,
+        report_period: reportPeriod,
+      };
+      if (debouncedQuery) q.q = debouncedQuery;
+      if (adsFilter) q.ads = adsFilter;
+      if (missing) q.missing = missing;
+      return { ...q, ...override };
+    },
+    [sort, offset, debouncedQuery, adsFilter, missing, reportPeriod],
+  );
+
   const fetchProducts = useCallback(async () => {
     if (!api) return;
     setLoading(true);
     setError(null);
-    const query: ProductsQuery = { sort, limit: PAGE_SIZE, offset, period: 30 };
-    if (debouncedQuery) query.q = debouncedQuery;
-    if (adsFilter)      query.ads = adsFilter;
-    if (missing)        query.missing = missing;
-
     try {
-      const res = await api.getProducts(query);
+      const res = await api.getProducts(buildQuery());
       setItems(res.items);
       setTotal(res.total);
     } catch (err: unknown) {
@@ -110,9 +145,36 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [api, sort, offset, debouncedQuery, adsFilter, missing]);
+  }, [api, buildQuery]);
 
   useEffect(() => { fetchProducts(); }, [fetchProducts]);
+
+  const handleReportPeriodChange = useCallback(
+    (next: ReportPeriod) => {
+      if (next === reportPeriod) return;
+      try {
+        localStorage.setItem(REPORT_PERIOD_STORAGE_KEY, String(next));
+      } catch {
+        // localStorage может быть недоступен (private mode и т.п.)
+      }
+      updateParam("report_period", String(next), { resetOffset: true });
+    },
+    [reportPeriod, updateParam],
+  );
+
+  const handleExport = useCallback(async () => {
+    if (!api) return;
+    setExporting(true);
+    try {
+      // limit/offset для экспорта не важны — сервер возвращает все строки
+      // после применения фильтров.
+      await api.downloadProductsExport(buildQuery({ limit: undefined, offset: undefined }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Ошибка экспорта");
+    } finally {
+      setExporting(false);
+    }
+  }, [api, buildQuery]);
 
   const totalPages  = Math.ceil(total / PAGE_SIZE);
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -127,6 +189,33 @@ export default function ProductsPage() {
   return (
     <div className="page">
       <h1 className="page-title">{titleText}</h1>
+
+      <div className="toolbar-row">
+        <div
+          className="period-toggle"
+          role="group"
+          aria-label="Период отчёта"
+        >
+          {REPORT_PERIODS.map((p) => (
+            <button
+              key={p}
+              type="button"
+              className={`period-toggle-btn${p === reportPeriod ? " active" : ""}`}
+              onClick={() => handleReportPeriodChange(p)}
+            >
+              {p} дн
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          className="btn btn-sm btn-export"
+          onClick={handleExport}
+          disabled={exporting}
+        >
+          {exporting ? "Экспорт..." : "Экспорт в Excel"}
+        </button>
+      </div>
 
       <div className="filters-row">
         <input

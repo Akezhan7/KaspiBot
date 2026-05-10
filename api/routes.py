@@ -12,6 +12,7 @@ API маршруты TMA Dashboard.
 Таблица маршрутов:
   GET  /api/dashboard              — главная сводка
   GET  /api/products               — список товаров с метриками (пагинация, сортировка)
+  GET  /api/products/export.xlsx   — экспорт списка товаров в Excel
   GET  /api/products/{sku}         — карточка товара: метрики, тренды, история
   GET  /api/ads/top-spenders       — топ по затратам
   GET  /api/ads/top-performers     — топ по ROAS
@@ -108,6 +109,26 @@ _MISSING_FILTER_MAP: dict[str, tuple[tuple[str, ...], bool, bool]] = {
     "bonus_review": ((_SRC_BONUS_REVIEW, _SRC_BONUS_LEGACY), True, False),
 }
 
+# Поддерживаемые report_period (длина окна XLSX-отчёта в днях). Скрапер парсит
+# оба значения за одну ночь и кладёт строки с нужным period_days в БД.
+_ALLOWED_REPORT_PERIODS = {7, 30}
+_DEFAULT_REPORT_PERIOD = 7
+
+
+def _parse_report_period(request: web.Request) -> int:
+    """Получить значение report_period из query (?report_period=7|30).
+
+    Если параметр не указан или невалиден, возвращаем дефолтные 7 дней.
+    """
+    raw = request.rel_url.query.get("report_period", "").strip()
+    if not raw:
+        return _DEFAULT_REPORT_PERIOD
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_REPORT_PERIOD
+    return value if value in _ALLOWED_REPORT_PERIODS else _DEFAULT_REPORT_PERIOD
+
 
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
@@ -197,18 +218,114 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
+async def _build_products_list(
+    ads_db: "AdsDataDB",
+    products_db: "ProductsDB",
+    *,
+    period: int,
+    report_period: int,
+    query_text: str,
+    ads_filter: str,
+    missing: str,
+    sort: str,
+) -> list[dict]:
+    """Собрать и отфильтровать список товаров с рекламными метриками.
+
+    Используется и `/api/products` (с пагинацией), и
+    `/api/products/export.xlsx` (полная выгрузка) — единая точка фильтрации
+    исключает расхождения между UI и экспортом.
+    """
+    if query_text:
+        catalog = await products_db.search_products(query_text)
+    else:
+        catalog = await products_db.get_all_products()
+
+    ads_summaries: dict[str, dict] = {
+        row["product_sku"]: row
+        for row in await ads_db.get_spend_revenue_summary(
+            period_days=period, report_period=report_period,
+        )
+    }
+
+    external_skus = await ads_db.get_active_skus_by_source(
+        _SRC_EXTERNAL, period_days=period, require_spend=True,
+        report_period=report_period,
+    )
+    bonus_seller_skus = (
+        await ads_db.get_active_skus_by_source(
+            _SRC_BONUS_SELLER, period_days=period, require_active_bonus=True,
+            report_period=report_period,
+        )
+        | await ads_db.get_active_skus_by_source(
+            _SRC_BONUS_LEGACY, period_days=period, require_active_bonus=True,
+            report_period=report_period,
+        )
+    )
+    bonus_review_skus = (
+        await ads_db.get_active_skus_by_source(
+            _SRC_BONUS_REVIEW, period_days=period, require_active_bonus=True,
+            report_period=report_period,
+        )
+        | await ads_db.get_active_skus_by_source(
+            _SRC_BONUS_LEGACY, period_days=period, require_active_bonus=True,
+            report_period=report_period,
+        )
+    )
+
+    items: list[dict] = []
+    for product in catalog:
+        sku = product["master_sku"]
+        ads = ads_summaries.get(sku, {})
+        has_ads = sku in ads_summaries
+        spend = _safe_float(ads.get("total_spend"))
+        items.append({
+            "sku": sku,
+            "title": product.get("title") or sku,
+            "url": product.get("url"),
+            "has_ads": has_ads,
+            "has_external_ads": sku in external_skus,
+            "has_bonus_seller": sku in bonus_seller_skus,
+            "has_bonus_review": sku in bonus_review_skus,
+            "spend": round(spend, 2),
+            "revenue": 0.0,
+            "clicks": _safe_int(ads.get("total_clicks")),
+            "impressions": _safe_int(ads.get("total_impressions")),
+            "avg_ctr": round(_safe_float(ads.get("avg_ctr")), 3),
+            "avg_cpc": round(_safe_float(ads.get("avg_cpc")), 2),
+            "roi_percent": None,
+        })
+
+    if missing == "ads":
+        items = [i for i in items if not i["has_ads"]]
+    elif missing == "external":
+        items = [i for i in items if not i["has_external_ads"]]
+    elif missing == "bonus_seller":
+        items = [i for i in items if not i["has_bonus_seller"]]
+    elif missing == "bonus_review":
+        items = [i for i in items if not i["has_bonus_review"]]
+
+    if ads_filter == "with":
+        items = [i for i in items if i["has_ads"]]
+    elif ads_filter == "without":
+        items = [i for i in items if not i["has_ads"]]
+
+    return _sort_items_by(items, sort)
+
+
 async def _handle_products_list(request: web.Request) -> web.Response:
     """GET /api/products — каталог товаров с наслоением рекламных метрик.
 
     Параметры:
-        sort      — spend_desc | spend_asc | ctr_desc | clicks_desc | roi_desc | roi_asc
-        limit     — 1..100 (default 20)
-        offset    — 0..N
-        period    — 1..365 дней истории (default 30)
-        q         — поиск по title/SKU
-        ads       — with | without (deprecated, оставлен для совместимости)
-        missing   — ads | external | bonus_seller | bonus_review
-                    (товары, у которых нет указанного признака)
+        sort           — spend_desc | spend_asc | ctr_desc | clicks_desc | roi_desc | roi_asc
+        limit          — 1..100 (default 20)
+        offset         — 0..N
+        period         — 1..365 дней истории (default 30)
+        report_period  — 7 | 30 — длина окна XLSX-отчёта (default 7).
+                         Влияет на фильтрацию по period_days в ads_data.
+        q              — поиск по title/SKU
+        ads            — with | without (deprecated, оставлен для совместимости)
+        missing        — ads | external | bonus_seller | bonus_review
+                         (товары, у которых нет указанного признака)
     """
     deps = request.app[_DEPS_KEY]
     ads_db: "AdsDataDB" = deps["ads_db"]
@@ -218,82 +335,22 @@ async def _handle_products_list(request: web.Request) -> web.Response:
     limit = _parse_int_param(request, "limit", 20, 1, _MAX_PAGE_LIMIT)
     offset = _parse_int_param(request, "offset", 0, 0)
     period = _parse_int_param(request, "period", 30, 1, 365)
+    report_period = _parse_report_period(request)
     query_text = request.rel_url.query.get("q", "").strip()
     ads_filter = request.rel_url.query.get("ads", "").strip().lower()
     missing = request.rel_url.query.get("missing", "").strip().lower()
 
     try:
-        if query_text:
-            catalog = await products_db.search_products(query_text)
-        else:
-            catalog = await products_db.get_all_products()
-
-        # Рекламные метрики (kaspi_marketing) по SKU за период
-        ads_summaries: dict[str, dict] = {
-            row["product_sku"]: row
-            for row in await ads_db.get_spend_revenue_summary(period_days=period)
-        }
-
-        # Множества SKU по типам источников — для быстрого фильтра/индикаторов.
-        external_skus = await ads_db.get_active_skus_by_source(
-            _SRC_EXTERNAL, period_days=period, require_spend=True,
+        items = await _build_products_list(
+            ads_db,
+            products_db,
+            period=period,
+            report_period=report_period,
+            query_text=query_text,
+            ads_filter=ads_filter,
+            missing=missing,
+            sort=sort,
         )
-        bonus_seller_skus = (
-            await ads_db.get_active_skus_by_source(
-                _SRC_BONUS_SELLER, period_days=period, require_active_bonus=True,
-            )
-            | await ads_db.get_active_skus_by_source(
-                _SRC_BONUS_LEGACY, period_days=period, require_active_bonus=True,
-            )
-        )
-        bonus_review_skus = (
-            await ads_db.get_active_skus_by_source(
-                _SRC_BONUS_REVIEW, period_days=period, require_active_bonus=True,
-            )
-            | await ads_db.get_active_skus_by_source(
-                _SRC_BONUS_LEGACY, period_days=period, require_active_bonus=True,
-            )
-        )
-
-        items: list[dict] = []
-        for product in catalog:
-            sku = product["master_sku"]
-            ads = ads_summaries.get(sku, {})
-            has_ads = sku in ads_summaries
-            spend = _safe_float(ads.get("total_spend"))
-            items.append({
-                "sku": sku,
-                "title": product.get("title") or sku,
-                "url": product.get("url"),
-                "has_ads": has_ads,
-                "has_external_ads": sku in external_skus,
-                "has_bonus_seller": sku in bonus_seller_skus,
-                "has_bonus_review": sku in bonus_review_skus,
-                "spend": round(spend, 2),
-                "revenue": 0.0,
-                "clicks": _safe_int(ads.get("total_clicks")),
-                "impressions": _safe_int(ads.get("total_impressions")),
-                "avg_ctr": round(_safe_float(ads.get("avg_ctr")), 3),
-                "avg_cpc": round(_safe_float(ads.get("avg_cpc")), 2),
-                "roi_percent": None,
-            })
-
-        # Фильтрация по «отсутствию» определённого типа активности.
-        if missing == "ads":
-            items = [i for i in items if not i["has_ads"]]
-        elif missing == "external":
-            items = [i for i in items if not i["has_external_ads"]]
-        elif missing == "bonus_seller":
-            items = [i for i in items if not i["has_bonus_seller"]]
-        elif missing == "bonus_review":
-            items = [i for i in items if not i["has_bonus_review"]]
-
-        if ads_filter == "with":
-            items = [i for i in items if i["has_ads"]]
-        elif ads_filter == "without":
-            items = [i for i in items if not i["has_ads"]]
-
-        items = _sort_items_by(items, sort)
         total = len(items)
         page = items[offset: offset + limit]
 
@@ -303,6 +360,7 @@ async def _handle_products_list(request: web.Request) -> web.Response:
             "offset": offset,
             "sort": sort,
             "period_days": period,
+            "report_period": report_period,
             "filters": {
                 "q": query_text,
                 "ads": ads_filter if ads_filter in {"with", "without"} else "",
@@ -312,6 +370,94 @@ async def _handle_products_list(request: web.Request) -> web.Response:
         })
     except Exception as exc:
         logger.error("products_list: ошибка: %s", exc, exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _handle_products_export(request: web.Request) -> web.StreamResponse:
+    """GET /api/products/export.xlsx — выгрузка списка товаров в Excel.
+
+    Принимает те же фильтры, что и `/api/products`, но игнорирует limit/offset:
+    в файл попадают ВСЕ товары после применения фильтров.
+    """
+    deps = request.app[_DEPS_KEY]
+    ads_db: "AdsDataDB" = deps["ads_db"]
+    products_db: "ProductsDB" = deps["products_db"]
+
+    sort = _parse_sort_param(request)
+    period = _parse_int_param(request, "period", 30, 1, 365)
+    report_period = _parse_report_period(request)
+    query_text = request.rel_url.query.get("q", "").strip()
+    ads_filter = request.rel_url.query.get("ads", "").strip().lower()
+    missing = request.rel_url.query.get("missing", "").strip().lower()
+
+    try:
+        items = await _build_products_list(
+            ads_db,
+            products_db,
+            period=period,
+            report_period=report_period,
+            query_text=query_text,
+            ads_filter=ads_filter,
+            missing=missing,
+            sort=sort,
+        )
+
+        from .xlsx_writer import write_xlsx
+
+        headers = [
+            "SKU",
+            "Название",
+            "Период отчёта (дн.)",
+            "Затраты, ₸",
+            "Клики",
+            "Показы",
+            "CTR, %",
+            "CPC, ₸",
+            "Реклама",
+            "Внешняя реклама",
+            "Бонус продавца",
+            "Бонус за отзыв",
+            "Ссылка",
+        ]
+        rows = [
+            [
+                item["sku"],
+                item["title"],
+                report_period,
+                item["spend"],
+                item["clicks"],
+                item["impressions"],
+                item["avg_ctr"],
+                item["avg_cpc"],
+                "Да" if item["has_ads"] else "Нет",
+                "Да" if item["has_external_ads"] else "Нет",
+                "Да" if item["has_bonus_seller"] else "Нет",
+                "Да" if item["has_bonus_review"] else "Нет",
+                item.get("url") or "",
+            ]
+            for item in items
+        ]
+
+        payload = write_xlsx(
+            headers=headers,
+            rows=rows,
+            sheet_name=f"Аналитика {report_period}д",
+        )
+
+        from datetime import datetime as _dt
+        filename = f"kaspibot-products-{report_period}d-{_dt.now():%Y%m%d-%H%M}.xlsx"
+        return web.Response(
+            body=payload,
+            content_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
+    except Exception as exc:
+        logger.error("products_export: ошибка: %s", exc, exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
@@ -331,6 +477,7 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
     sku = request.match_info["sku"]
     period = _parse_int_param(request, "period", 30, 1, 365)
     trend_days = _parse_int_param(request, "trend_days", 30, 7, 90)
+    report_period = _parse_report_period(request)
 
     try:
         product = await products_db.get_product(sku)
@@ -345,11 +492,21 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
         cpc_eff = await processor.get_cpc_efficiency(sku)
         trends = await aggregator.get_trends(sku, days=trend_days)
 
-        latest_marketing = await ads_db.get_latest_by_sku(sku, source=_SRC_MARKETING)
-        latest_external = await ads_db.get_latest_by_sku(sku, source=_SRC_EXTERNAL)
-        latest_bonus_seller = await ads_db.get_latest_by_sku(sku, source=_SRC_BONUS_SELLER)
-        latest_bonus_review = await ads_db.get_latest_by_sku(sku, source=_SRC_BONUS_REVIEW)
-        latest_bonus_legacy = await ads_db.get_latest_by_sku(sku, source=_SRC_BONUS_LEGACY)
+        latest_marketing = await ads_db.get_latest_by_sku(
+            sku, source=_SRC_MARKETING, report_period=report_period,
+        )
+        latest_external = await ads_db.get_latest_by_sku(
+            sku, source=_SRC_EXTERNAL, report_period=report_period,
+        )
+        latest_bonus_seller = await ads_db.get_latest_by_sku(
+            sku, source=_SRC_BONUS_SELLER, report_period=report_period,
+        )
+        latest_bonus_review = await ads_db.get_latest_by_sku(
+            sku, source=_SRC_BONUS_REVIEW, report_period=report_period,
+        )
+        latest_bonus_legacy = await ads_db.get_latest_by_sku(
+            sku, source=_SRC_BONUS_LEGACY, report_period=report_period,
+        )
 
         # Назад-совместимость: latest_data — последняя marketing-запись,
         # с подмешиванием бонусной информации (старая контрактная форма).
@@ -390,6 +547,7 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
             "sections": sections,
             "period_days": period,
             "trend_days": trend_days,
+            "report_period": report_period,
         })
     except Exception as exc:
         logger.error("product_detail sku=%s: ошибка: %s", sku, exc, exc_info=True)
@@ -697,6 +855,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/health", _handle_health)
     app.router.add_get("/api/dashboard", _handle_dashboard)
     app.router.add_get("/api/products", _handle_products_list)
+    app.router.add_get("/api/products/export.xlsx", _handle_products_export)
     app.router.add_get("/api/products/{sku}", _handle_product_detail)
     app.router.add_get("/api/ads/top-spenders", _handle_top_spenders)
     app.router.add_get("/api/ads/top-performers", _handle_top_performers)

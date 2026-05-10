@@ -73,9 +73,67 @@ export function createApiClient(initData: string) {
     getProducts: (params: ProductsQuery) =>
       get<ProductsResponse>("/api/products", params as Record<string, string | number>),
 
+    /**
+     * Скачать XLSX-отчёт /api/products/export.xlsx с теми же фильтрами, что
+     * и `/api/products`. Запрос идёт с заголовком Authorization (как обычный
+     * API-вызов), а файл доставляется в браузер через Blob и временную
+     * ссылку — это позволяет не пробрасывать initData в URL.
+     *
+     * @param params Те же query-параметры, что и у `getProducts` (limit/offset
+     * игнорируются сервером — в файл попадают все строки).
+     * @param suggestedName Имя файла, если в Content-Disposition нет filename.
+     */
+    downloadProductsExport: async (
+      params: ProductsQuery,
+      suggestedName = "kaspibot-products.xlsx",
+    ) => {
+      const url = new URL(API_BASE + "/api/products/export.xlsx", window.location.origin);
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== "") {
+          url.searchParams.set(k, String(v));
+        }
+      });
+      const headers: Record<string, string> = {};
+      if (initData) {
+        headers["Authorization"] = `tma ${initData}`;
+      }
+      const res = await fetch(url.toString(), { headers });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          msg = body.error ?? msg;
+        } catch {
+          // ignore
+        }
+        throw new ApiError(res.status, msg);
+      }
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const fileMatch = disposition.match(/filename="?([^";]+)"?/i);
+      const filename = fileMatch ? fileMatch[1] : suggestedName;
+
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = filename;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Браузер успеет начать скачивание до того как мы освободим Blob.
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1_000);
+    },
+
     /** GET /api/products/{sku} */
-    getProduct: (sku: string, params?: { period?: number; trend_days?: number }) =>
-      get<ProductDetailResponse>(`/api/products/${encodeURIComponent(sku)}`, params as Record<string, number>),
+    getProduct: (
+      sku: string,
+      params?: { period?: number; trend_days?: number; report_period?: ReportPeriod },
+    ) =>
+      get<ProductDetailResponse>(
+        `/api/products/${encodeURIComponent(sku)}`,
+        params as Record<string, number>,
+      ),
 
     /** GET /api/ads/top-spenders */
     getTopSpenders: (limit = 20) =>
@@ -159,11 +217,14 @@ export interface ProductItem {
 
 export type MissingFilter = "ads" | "external" | "bonus_seller" | "bonus_review";
 
+export type ReportPeriod = 7 | 30;
+
 export interface ProductsQuery {
   sort?: string;
   limit?: number;
   offset?: number;
   period?: number;
+  report_period?: ReportPeriod;
   q?: string;
   ads?: "with" | "without";
   missing?: MissingFilter;
@@ -175,6 +236,7 @@ export interface ProductsResponse {
   offset: number;
   sort: string;
   period_days: number;
+  report_period: ReportPeriod;
   items: ProductItem[];
 }
 
@@ -237,6 +299,7 @@ export interface ProductDetailResponse {
   sections?: ProductSections;
   period_days: number;
   trend_days: number;
+  report_period?: ReportPeriod;
 }
 
 export interface AdsItem {

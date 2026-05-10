@@ -23,6 +23,7 @@ class AdCampaignData:
     period_start: date | None = None
     period_end: date | None = None
     source: str = "kaspi_marketing"
+    period_days: int = 7    # Какой отчётный период (7 или 30)
 
     def to_dao_dict(self, scraped_at: str) -> dict:
         """Конвертация в словарь для AdsDataDB.save_campaign."""
@@ -48,6 +49,7 @@ class AdCampaignData:
             "bonus_active": 0,
             "bonus_percent": 0.0,
             "raw_data": raw,
+            "period_days": self.period_days,
         }
 
 
@@ -66,6 +68,7 @@ class BonusData:
     bonus_active: bool
     bonus_percent: float
     source: str = "kaspi_bonus"
+    period_days: int = 7
 
     def to_dao_dict(self, scraped_at: str) -> dict:
         """Конвертация в словарь для AdsDataDB.save_campaign."""
@@ -91,6 +94,7 @@ class BonusData:
             "bonus_active": 1 if self.bonus_active else 0,
             "bonus_percent": self.bonus_percent,
             "raw_data": raw,
+            "period_days": self.period_days,
         }
 
 

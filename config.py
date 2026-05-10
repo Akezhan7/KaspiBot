@@ -139,6 +139,14 @@ class Config:
     SMS_CODE_TIMEOUT_SECONDS: int = int(os.getenv("SMS_CODE_TIMEOUT_SECONDS", "300"))
     KASPI_PAY_NAV_TIMEOUT_SECONDS: int = int(os.getenv("KASPI_PAY_NAV_TIMEOUT_SECONDS", "60"))
     KASPI_MARKETING_REPORT_DAYS: int = int(os.getenv("KASPI_MARKETING_REPORT_DAYS", "7"))
+    # Список периодов отчётов для двойной выгрузки (CSV из env, дефолт "7,30").
+    # Скрапер пройдёт по списку и для каждого периода скачает свой XLSX,
+    # сохранив в БД с соответствующим period_days.
+    KASPI_MARKETING_REPORT_PERIODS: List[int] = sorted({
+        int(p.strip())
+        for p in os.getenv("KASPI_MARKETING_REPORT_PERIODS", "7,30").split(",")
+        if p.strip().isdigit() and int(p.strip()) > 0
+    }) or [7]
 
     # === TMA API (REST API для Telegram Mini App) ===
     TMA_API_HOST: str = os.getenv("TMA_API_HOST", "0.0.0.0")
