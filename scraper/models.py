@@ -53,7 +53,13 @@ class AdCampaignData:
 
 @dataclass
 class BonusData:
-    """Данные о бонусах продукта из раздела «Бонусы»."""
+    """Данные о бонусах продукта из раздела «Бонусы».
+
+    source может быть одним из:
+        kaspi_bonus_seller — бонус от продавца (раздел /bonuses/products/)
+        kaspi_bonus_review — бонус за отзыв (раздел /bonuses/reviews/)
+        kaspi_bonus       — legacy / неизвестный источник (для совместимости)
+    """
 
     product_sku: str
     product_name: str
@@ -63,6 +69,11 @@ class BonusData:
 
     def to_dao_dict(self, scraped_at: str) -> dict:
         """Конвертация в словарь для AdsDataDB.save_campaign."""
+        raw: dict = {"product_name": self.product_name}
+        # campaign_name выставляется скрапером после создания объекта
+        campaign_name = getattr(self, "_campaign_name", "")
+        if campaign_name:
+            raw["campaign_name"] = campaign_name
         return {
             "product_sku": self.product_sku,
             "product_name": self.product_name,
@@ -79,7 +90,7 @@ class BonusData:
             "revenue": 0.0,
             "bonus_active": 1 if self.bonus_active else 0,
             "bonus_percent": self.bonus_percent,
-            "raw_data": {"product_name": self.product_name},
+            "raw_data": raw,
         }
 
 

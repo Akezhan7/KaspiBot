@@ -93,6 +93,21 @@ _ALLOWED_SORT_KEYS = {
 # Максимальный limit в одном запросе
 _MAX_PAGE_LIMIT = 100
 
+# Идентификаторы источников ads_data — используются в /api/products?missing=...
+_SRC_MARKETING = "kaspi_marketing"        # внутренняя реклама
+_SRC_EXTERNAL = "kaspi_external_ads"      # внешняя реклама
+_SRC_BONUS_SELLER = "kaspi_bonus_seller"  # бонус от продавца
+_SRC_BONUS_REVIEW = "kaspi_bonus_review"  # бонус за отзыв
+_SRC_BONUS_LEGACY = "kaspi_bonus"         # старые записи до миграции (учитываются для бонусных фильтров)
+
+# Маппинг missing-значения → (source, требует bonus_active=1, требует spend>0)
+_MISSING_FILTER_MAP: dict[str, tuple[tuple[str, ...], bool, bool]] = {
+    "ads": ((_SRC_MARKETING,), False, True),
+    "external": ((_SRC_EXTERNAL,), False, True),
+    "bonus_seller": ((_SRC_BONUS_SELLER, _SRC_BONUS_LEGACY), True, False),
+    "bonus_review": ((_SRC_BONUS_REVIEW, _SRC_BONUS_LEGACY), True, False),
+}
+
 
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
@@ -183,11 +198,17 @@ async def _handle_dashboard(request: web.Request) -> web.Response:
 
 
 async def _handle_products_list(request: web.Request) -> web.Response:
-    """GET /api/products?sort=spend_desc&limit=20&offset=0&period=30&q=&ads=with|without — каталог товаров.
+    """GET /api/products — каталог товаров с наслоением рекламных метрик.
 
-    Первичный источник — таблица products (реальные названия).
-    Ads-метрики наслаиваются где SKU совпадает с ads_data.
-    Параметр ads=with: только товары с данными рекламы; ads=without: без рекламы.
+    Параметры:
+        sort      — spend_desc | spend_asc | ctr_desc | clicks_desc | roi_desc | roi_asc
+        limit     — 1..100 (default 20)
+        offset    — 0..N
+        period    — 1..365 дней истории (default 30)
+        q         — поиск по title/SKU
+        ads       — with | without (deprecated, оставлен для совместимости)
+        missing   — ads | external | bonus_seller | bonus_review
+                    (товары, у которых нет указанного признака)
     """
     deps = request.app[_DEPS_KEY]
     ads_db: "AdsDataDB" = deps["ads_db"]
@@ -198,22 +219,42 @@ async def _handle_products_list(request: web.Request) -> web.Response:
     offset = _parse_int_param(request, "offset", 0, 0)
     period = _parse_int_param(request, "period", 30, 1, 365)
     query_text = request.rel_url.query.get("q", "").strip()
-    ads_filter = request.rel_url.query.get("ads", "").strip().lower()  # with | without | ""
+    ads_filter = request.rel_url.query.get("ads", "").strip().lower()
+    missing = request.rel_url.query.get("missing", "").strip().lower()
 
     try:
-        # Первичный источник: таблица products (реальные названия)
         if query_text:
             catalog = await products_db.search_products(query_text)
         else:
             catalog = await products_db.get_all_products()
 
-        # Рекламные метрики по SKU за период
+        # Рекламные метрики (kaspi_marketing) по SKU за период
         ads_summaries: dict[str, dict] = {
             row["product_sku"]: row
             for row in await ads_db.get_spend_revenue_summary(period_days=period)
         }
 
-        # Сборка: каталожный товар + наслоение рекламных данных
+        # Множества SKU по типам источников — для быстрого фильтра/индикаторов.
+        external_skus = await ads_db.get_active_skus_by_source(
+            _SRC_EXTERNAL, period_days=period, require_spend=True,
+        )
+        bonus_seller_skus = (
+            await ads_db.get_active_skus_by_source(
+                _SRC_BONUS_SELLER, period_days=period, require_active_bonus=True,
+            )
+            | await ads_db.get_active_skus_by_source(
+                _SRC_BONUS_LEGACY, period_days=period, require_active_bonus=True,
+            )
+        )
+        bonus_review_skus = (
+            await ads_db.get_active_skus_by_source(
+                _SRC_BONUS_REVIEW, period_days=period, require_active_bonus=True,
+            )
+            | await ads_db.get_active_skus_by_source(
+                _SRC_BONUS_LEGACY, period_days=period, require_active_bonus=True,
+            )
+        )
+
         items: list[dict] = []
         for product in catalog:
             sku = product["master_sku"]
@@ -225,6 +266,9 @@ async def _handle_products_list(request: web.Request) -> web.Response:
                 "title": product.get("title") or sku,
                 "url": product.get("url"),
                 "has_ads": has_ads,
+                "has_external_ads": sku in external_skus,
+                "has_bonus_seller": sku in bonus_seller_skus,
+                "has_bonus_review": sku in bonus_review_skus,
                 "spend": round(spend, 2),
                 "revenue": 0.0,
                 "clicks": _safe_int(ads.get("total_clicks")),
@@ -233,6 +277,16 @@ async def _handle_products_list(request: web.Request) -> web.Response:
                 "avg_cpc": round(_safe_float(ads.get("avg_cpc")), 2),
                 "roi_percent": None,
             })
+
+        # Фильтрация по «отсутствию» определённого типа активности.
+        if missing == "ads":
+            items = [i for i in items if not i["has_ads"]]
+        elif missing == "external":
+            items = [i for i in items if not i["has_external_ads"]]
+        elif missing == "bonus_seller":
+            items = [i for i in items if not i["has_bonus_seller"]]
+        elif missing == "bonus_review":
+            items = [i for i in items if not i["has_bonus_review"]]
 
         if ads_filter == "with":
             items = [i for i in items if i["has_ads"]]
@@ -252,6 +306,7 @@ async def _handle_products_list(request: web.Request) -> web.Response:
             "filters": {
                 "q": query_text,
                 "ads": ads_filter if ads_filter in {"with", "without"} else "",
+                "missing": missing if missing in _MISSING_FILTER_MAP else "",
             },
             "items": page,
         })
@@ -261,7 +316,12 @@ async def _handle_products_list(request: web.Request) -> web.Response:
 
 
 async def _handle_product_detail(request: web.Request) -> web.Response:
-    """GET /api/products/{sku}?period=30&trend_days=30 — карточка товара."""
+    """GET /api/products/{sku}?period=30&trend_days=30 — карточка товара.
+
+    Возвращает 4 раздела активности (marketing / external_ads / bonus_seller /
+    bonus_review). Каждый — dict со статусом, метриками и названием
+    последней кампании/акции.
+    """
     deps = request.app[_DEPS_KEY]
     processor: "AdsAnalyticsProcessor" = deps["processor"]
     aggregator: "DataAggregator" = deps["aggregator"]
@@ -275,7 +335,6 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
     try:
         product = await products_db.get_product(sku)
 
-        # Не возвращаем 404 если товар есть в ads_data — карточка всё равно полезна
         if product is None:
             latest_check = await ads_db.get_latest_by_sku(sku)
             if latest_check is None:
@@ -285,22 +344,39 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
         roas = await processor.calculate_roas(sku, period_days=period)
         cpc_eff = await processor.get_cpc_efficiency(sku)
         trends = await aggregator.get_trends(sku, days=trend_days)
-        latest_marketing = await ads_db.get_latest_by_sku(sku, source="kaspi_marketing")
-        latest_bonus = await ads_db.get_latest_by_sku(sku, source="kaspi_bonus")
 
+        latest_marketing = await ads_db.get_latest_by_sku(sku, source=_SRC_MARKETING)
+        latest_external = await ads_db.get_latest_by_sku(sku, source=_SRC_EXTERNAL)
+        latest_bonus_seller = await ads_db.get_latest_by_sku(sku, source=_SRC_BONUS_SELLER)
+        latest_bonus_review = await ads_db.get_latest_by_sku(sku, source=_SRC_BONUS_REVIEW)
+        latest_bonus_legacy = await ads_db.get_latest_by_sku(sku, source=_SRC_BONUS_LEGACY)
+
+        # Назад-совместимость: latest_data — последняя marketing-запись,
+        # с подмешиванием бонусной информации (старая контрактная форма).
         latest_data: dict | None = None
         if latest_marketing:
             latest_data = dict(latest_marketing)
-        elif latest_bonus:
-            latest_data = dict(latest_bonus)
+        elif latest_bonus_seller or latest_bonus_review or latest_bonus_legacy:
+            latest_data = dict(
+                latest_bonus_seller or latest_bonus_review or latest_bonus_legacy
+            )
 
-        if latest_data is not None and latest_bonus:
-            latest_data["bonus_active"] = latest_bonus.get("bonus_active", 0)
-            latest_data["bonus_percent"] = latest_bonus.get("bonus_percent", 0.0)
-            latest_data["bonus_scraped_at"] = latest_bonus.get("scraped_at")
+        any_bonus = latest_bonus_seller or latest_bonus_review or latest_bonus_legacy
+        if latest_data is not None and any_bonus:
+            latest_data["bonus_active"] = any_bonus.get("bonus_active", 0)
+            latest_data["bonus_percent"] = any_bonus.get("bonus_percent", 0.0)
+            latest_data["bonus_scraped_at"] = any_bonus.get("scraped_at")
 
         title = product.get("title") if product else await _enrich_title(sku, products_db, ads_db)
         url = product.get("url") if product else None
+
+        # 4 секции активности
+        sections = {
+            "marketing": _build_ads_section(latest_marketing),
+            "external_ads": _build_ads_section(latest_external),
+            "bonus_seller": _build_bonus_section(latest_bonus_seller, latest_bonus_legacy),
+            "bonus_review": _build_bonus_section(latest_bonus_review, latest_bonus_legacy),
+        }
 
         return web.json_response({
             "sku": sku,
@@ -311,12 +387,110 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
             "cpc_efficiency": cpc_eff,
             "trends": trends,
             "latest_data": latest_data,
+            "sections": sections,
             "period_days": period,
             "trend_days": trend_days,
         })
     except Exception as exc:
         logger.error("product_detail sku=%s: ошибка: %s", sku, exc, exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
+
+
+# ---------------------------------------------------------------------------
+# Секции активности товара
+# ---------------------------------------------------------------------------
+
+# Если последнее списание было больше этого порога — реклама запущена,
+# но фактически не показывается (типичный случай: чужая ставка ниже на 3%).
+_ADS_STALE_DAYS = 2
+
+
+def _campaign_name_from_raw(row: dict | None) -> str | None:
+    """Достать campaign_name из raw_data JSON (либо None)."""
+    if not row:
+        return None
+    raw = row.get("raw_data")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        name = (data or {}).get("campaign_name") if isinstance(data, dict) else None
+        return name or None
+    except Exception:
+        return None
+
+
+def _build_ads_section(row: dict | None) -> dict:
+    """Сформировать секцию рекламной активности (marketing / external_ads).
+
+    activity:
+      inactive — записи нет
+      active   — есть запись с spend > 0 и свежее _ADS_STALE_DAYS
+      stale    — запись есть, но spend = 0 или скрапинг старше порога
+    """
+    if not row:
+        return {
+            "active": False,
+            "activity": "inactive",
+            "spend": 0.0,
+            "clicks": 0,
+            "impressions": 0,
+            "ctr": 0.0,
+            "cpc": 0.0,
+            "campaign_name": None,
+            "scraped_at": None,
+        }
+
+    spend = _safe_float(row.get("spend"))
+    scraped_at = row.get("scraped_at")
+    activity = "active" if spend > 0 else "stale"
+
+    if scraped_at and activity == "active":
+        try:
+            from datetime import datetime, timedelta
+            ts = datetime.fromisoformat(str(scraped_at).replace(" ", "T"))
+            if datetime.now() - ts > timedelta(days=_ADS_STALE_DAYS):
+                activity = "stale"
+        except Exception:
+            pass
+
+    return {
+        "active": True,
+        "activity": activity,
+        "spend": round(spend, 2),
+        "clicks": _safe_int(row.get("clicks")),
+        "impressions": _safe_int(row.get("impressions")),
+        "ctr": round(_safe_float(row.get("ctr")), 3),
+        "cpc": round(_safe_float(row.get("cpc")), 2),
+        "campaign_name": _campaign_name_from_raw(row),
+        "scraped_at": scraped_at,
+    }
+
+
+def _build_bonus_section(row: dict | None, legacy_row: dict | None) -> dict:
+    """Сформировать секцию бонуса (seller / review).
+
+    Если по новому source данных нет, но есть запись в kaspi_bonus
+    (старые скрапинги до миграции) — отображаем её как fallback.
+    """
+    src = row or legacy_row
+    if not src:
+        return {
+            "active": False,
+            "activity": "inactive",
+            "percent": 0.0,
+            "campaign_name": None,
+            "scraped_at": None,
+        }
+
+    bonus_active = bool(src.get("bonus_active"))
+    return {
+        "active": bonus_active,
+        "activity": "active" if bonus_active else "stale",
+        "percent": round(_safe_float(src.get("bonus_percent")), 2),
+        "campaign_name": _campaign_name_from_raw(src),
+        "scraped_at": src.get("scraped_at"),
+    }
 
 
 async def _handle_top_spenders(request: web.Request) -> web.Response:

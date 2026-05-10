@@ -36,6 +36,22 @@ _LEGACY_MARKETING_URL = "https://kaspi.kz/mc/marketing/ads"
 _LEGACY_BONUSES_URL = "https://kaspi.kz/mc/marketing/bonus"
 _LEGACY_BONUS_URLS = (_LEGACY_PROMOTIONS_SHOP_URL, _LEGACY_BONUSES_URL)
 
+# Идентификаторы источников бонусов (используются как ads_data.source)
+_BONUS_SOURCE_SELLER = "kaspi_bonus_seller"   # /bonuses/products/ — бонус от продавца
+_BONUS_SOURCE_REVIEW = "kaspi_bonus_review"   # /bonuses/reviews/ — бонус за отзыв
+_BONUS_SOURCE_LEGACY = "kaspi_bonus"          # неопределённый раздел (legacy)
+
+
+def _bonus_source_for_url(url: str) -> str:
+    """Определить тип бонуса по URL раздела."""
+    u = (url or "").lower()
+    if "/bonuses/reviews" in u:
+        return _BONUS_SOURCE_REVIEW
+    if "/bonuses/products" in u:
+        return _BONUS_SOURCE_SELLER
+    return _BONUS_SOURCE_LEGACY
+
+
 # Таймауты (мс)
 _PAGE_LOAD_TIMEOUT = 60_000
 _CONTENT_WAIT_TIMEOUT = 30_000
@@ -208,12 +224,16 @@ class MarketingScraper:
                 await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
                 await self._random_delay()
 
+                bonus_source = _bonus_source_for_url(url)
+
                 # 1) Drill-down в каждую акцию → реальные товары
-                drill_rows, drill_attempted = await self._scrape_all_bonus_drilldown(page)
+                drill_rows, drill_attempted = await self._scrape_all_bonus_drilldown(
+                    page, source=bonus_source,
+                )
                 if drill_rows:
                     logger.info(
-                        "MarketingScraper: drill-down дал %d бонусных товаров с %s",
-                        len(drill_rows), url,
+                        "MarketingScraper: drill-down дал %d бонусных товаров с %s (source=%s)",
+                        len(drill_rows), url, bonus_source,
                     )
                     collected.extend(drill_rows)
                     continue
@@ -233,9 +253,11 @@ class MarketingScraper:
                 dom_rows: list[BonusData] = []
                 if has_content:
                     dom_rows = await self._scroll_and_collect_bonus_rows(page)
+                    for r in dom_rows:
+                        r.source = bonus_source
                     logger.info(
-                        "MarketingScraper: бонусный URL %s дал %d строк из DOM (fallback)",
-                        url, len(dom_rows),
+                        "MarketingScraper: бонусный URL %s дал %d строк из DOM (fallback, source=%s)",
+                        url, len(dom_rows), bonus_source,
                     )
                     collected.extend(dom_rows)
                 else:
@@ -249,9 +271,11 @@ class MarketingScraper:
                 # 3) Fallback: xlsx верхнего уровня
                 report_rows = await self._collect_bonuses_from_report(page)
                 if report_rows:
+                    for r in report_rows:
+                        r.source = bonus_source
                     logger.info(
-                        "MarketingScraper: бонусный URL %s дал %d строк из отчёта (fallback)",
-                        url, len(report_rows),
+                        "MarketingScraper: бонусный URL %s дал %d строк из отчёта (fallback, source=%s)",
+                        url, len(report_rows), bonus_source,
                     )
                     collected.extend(report_rows)
                 elif not has_content:
@@ -346,28 +370,37 @@ class MarketingScraper:
         return all_products
 
     async def _scrape_all_bonus_drilldown(
-        self, page: Page
+        self, page: Page, source: str = _BONUS_SOURCE_LEGACY,
     ) -> tuple[list[BonusData], bool]:
         """Drill-down по акциям. Возвращает (товары, attempted).
 
         attempted=True если нашли список акций (даже если по 0 товаров на каждой):
         в таком случае НЕ нужен fallback на верхний XLSX (там названия акций, не товаров).
+
+        Параметр source — точный идентификатор раздела бонусов
+        (kaspi_bonus_seller / kaspi_bonus_review / kaspi_bonus). Применяется к
+        каждой записи + сохраняется название акции в campaign_name.
         """
         list_url = page.url
         entries = await self._collect_list_entries(page)
         if not entries:
             return [], False
 
-        logger.info("MarketingScraper: drill-down бонусы: %d акций", len(entries))
+        logger.info("MarketingScraper: drill-down бонусы: %d акций (source=%s)", len(entries), source)
         all_bonuses: list[BonusData] = []
 
         for i, entry in enumerate(entries):
             try:
                 rows = await self._scrape_entry_products_bonus(page, entry)
+                campaign_name = entry.get("name", "")
+                for r in rows:
+                    r.source = source
+                    if campaign_name:
+                        r._campaign_name = campaign_name  # type: ignore[attr-defined]
                 all_bonuses.extend(rows)
                 logger.info(
                     "MarketingScraper: акция %d/%d «%s» → %d товаров",
-                    i + 1, len(entries), entry["name"][:50], len(rows),
+                    i + 1, len(entries), campaign_name[:50], len(rows),
                 )
             except Exception as exc:
                 logger.warning(

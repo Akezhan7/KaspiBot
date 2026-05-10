@@ -1,13 +1,13 @@
 /**
  * ProductDetailPage — детальная карточка товара.
  *
- * Парсинг работает только за последние KASPI_MARKETING_REPORT_DAYS (=7д),
- * поэтому показываем фактически релевантные метрики:
- *   - Расход, Показы, Клики, CTR, CPC
- *   - Статус бонуса (активен / неактивен / нет данных)
- *   - Тренды (clicks/spend/ctr) — за весь доступный период истории
+ * Показывает 4 секции активности (внутренняя реклама / внешняя / бонус продавца /
+ * бонус за отзыв) с цветовой индикацией:
+ *   зелёный  — активна и реально работает (есть свежие списания)
+ *   жёлтый   — запущена, но не списывается (вероятно цена конкурента ниже)
+ *   серый    — не запущена
  *
- * ROI/ROAS/Выручка скрыты — Kaspi не отдаёт revenue в выгрузках.
+ * ROI/ROAS не показываем — Kaspi не отдаёт revenue.
  */
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -21,7 +21,12 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import type { ProductDetailResponse } from "../api/client";
+import type {
+  ActivityStatus,
+  AdsSection,
+  BonusSection,
+  ProductDetailResponse,
+} from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
 import "../styles/pages.css";
@@ -37,7 +42,7 @@ export default function ProductDetailPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    showBackButton(() => navigate("/products"));
+    showBackButton(() => navigate(-1));
   }, [showBackButton, navigate]);
 
   useEffect(() => {
@@ -55,12 +60,8 @@ export default function ProductDetailPage() {
   if (error) return <div className="page-error">Ошибка: {error}</div>;
   if (!data) return null;
 
+  const sections = data.sections;
   const latest = data.latest_data ?? {};
-  const spend = num(latest.spend) ?? num(data.roi?.spend);
-  const impressions = num(latest.impressions);
-  const clicks = num(latest.clicks);
-  const ctr = num(latest.ctr);
-  const cpc = num(latest.cpc);
 
   const bonusActive =
     latest.bonus_active === 1 || latest.bonus_active === true;
@@ -77,45 +78,43 @@ export default function ProductDetailPage() {
       <h1 className="page-title">{data.title ?? data.sku}</h1>
       <div className="sku-label">{data.sku}</div>
 
-      {/* Основные метрики из последнего скрапинга */}
-      <div className="metrics-grid">
-        <MetricCard label="Расход" value={`${fmt(spend)} ₸`} />
-        <MetricCard label="Показы" value={fmt(impressions)} />
-        <MetricCard label="Клики" value={fmt(clicks)} />
-        <MetricCard
-          label="CTR"
-          value={ctr != null ? `${ctr.toFixed(2)}%` : "—"}
-        />
-        <MetricCard
-          label="CPC"
-          value={cpc != null ? `${cpc.toFixed(0)} ₸` : "—"}
-        />
-        {hasBonusData ? (
-          <MetricCard
-            label="Бонус"
-            value={bonusActive ? `${bonusPercent ?? 0}%` : "Нет"}
-            className={bonusActive ? "roi-positive" : "roi-negative"}
+      {/* 4 секции активности */}
+      {sections && (
+        <div className="sections">
+          <AdsSectionCard
+            title="Реклама"
+            section={sections.marketing}
           />
-        ) : (
-          <MetricCard label="Бонус" value="—" />
-        )}
-      </div>
+          <AdsSectionCard
+            title="Внешняя реклама"
+            section={sections.external_ads}
+          />
+          <BonusSectionCard
+            title="Бонус продавца"
+            section={sections.bonus_seller}
+          />
+          <BonusSectionCard
+            title="Бонус за отзыв"
+            section={sections.bonus_review}
+          />
+        </div>
+      )}
 
-      {/* Подробный бонус-бейдж */}
+      {/* Подробный бонус-бейдж (агрегированный по обоим источникам) */}
       {hasBonusData && (
         <div
           className={`bonus-badge ${bonusActive ? "bonus-active" : "bonus-inactive"}`}
         >
           {bonusActive
-            ? `Бонус активен: ${bonusPercent ?? "—"}%`
-            : "Бонус не активен"}
+            ? `Любой бонус активен: ${bonusPercent ?? "—"}%`
+            : "Бонусы не активны"}
           <span className="bonus-icon-wrap">
             {bonusActive ? <Gift size={14} /> : <CircleX size={14} />}
           </span>
         </div>
       )}
 
-      {/* График трендов: клики + расход */}
+      {/* График динамики */}
       {chartData.length > 1 ? (
         <div className="chart-block">
           <h3 className="chart-title">Динамика</h3>
@@ -150,7 +149,6 @@ export default function ProductDetailPage() {
         </div>
       )}
 
-      {/* CTR тренд — отдельно если данных хотя бы 2 точки */}
       {chartData.length > 1 && (
         <div className="chart-block">
           <h3 className="chart-title">CTR по дням</h3>
@@ -175,19 +173,86 @@ export default function ProductDetailPage() {
   );
 }
 
-function MetricCard({
-  label,
-  value,
-  className = "",
+const STATUS_LABEL: Record<ActivityStatus, string> = {
+  active: "Активна",
+  stale: "Не показывается",
+  inactive: "Не запущена",
+};
+
+function AdsSectionCard({
+  title,
+  section,
 }: {
-  label: string;
-  value: string;
-  className?: string;
+  title: string;
+  section: AdsSection;
 }) {
   return (
-    <div className={`metric-card ${className}`}>
-      <div className="metric-value">{value}</div>
-      <div className="metric-label">{label}</div>
+    <div className={`section-card section-${section.activity}`}>
+      <div className="section-card-header">
+        <span className="section-card-title">{title}</span>
+        <span className={`section-status section-status-${section.activity}`}>
+          {STATUS_LABEL[section.activity]}
+        </span>
+      </div>
+      {section.active && (
+        <div className="section-card-body">
+          {section.campaign_name && (
+            <div className="section-card-row">
+              <span className="section-card-label">Кампания</span>
+              <span className="section-card-value">{section.campaign_name}</span>
+            </div>
+          )}
+          <div className="section-card-row">
+            <span className="section-card-label">Расход</span>
+            <span className="section-card-value">{fmt(section.spend)} ₸</span>
+          </div>
+          <div className="section-card-row">
+            <span className="section-card-label">CPC</span>
+            <span className="section-card-value">
+              {section.cpc > 0 ? `${section.cpc.toFixed(0)} ₸` : "—"}
+            </span>
+          </div>
+          <div className="section-card-row">
+            <span className="section-card-label">Показы / Клики</span>
+            <span className="section-card-value">
+              {fmt(section.impressions)} / {fmt(section.clicks)}
+            </span>
+          </div>
+          {section.ctr > 0 && (
+            <div className="section-card-row">
+              <span className="section-card-label">CTR</span>
+              <span className="section-card-value">{section.ctr.toFixed(2)}%</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BonusSectionCard({
+  title,
+  section,
+}: {
+  title: string;
+  section: BonusSection;
+}) {
+  return (
+    <div className={`section-card section-${section.activity}`}>
+      <div className="section-card-header">
+        <span className="section-card-title">{title}</span>
+        <span className={`section-status section-status-${section.activity}`}>
+          {section.active ? `${section.percent}%` : STATUS_LABEL[section.activity]}
+        </span>
+      </div>
+      {section.campaign_name && (
+        <div className="section-card-body">
+          <div className="section-card-row">
+            <span className="section-card-label">Акция</span>
+            <span className="section-card-value">{section.campaign_name}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

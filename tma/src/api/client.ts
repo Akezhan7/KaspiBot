@@ -145,6 +145,9 @@ export interface ProductItem {
   title: string | null;
   url?: string | null;
   has_ads: boolean;
+  has_external_ads: boolean;
+  has_bonus_seller: boolean;
+  has_bonus_review: boolean;
   spend: number;
   revenue: number;
   clicks: number;
@@ -154,6 +157,8 @@ export interface ProductItem {
   roi_percent: number | null;
 }
 
+export type MissingFilter = "ads" | "external" | "bonus_seller" | "bonus_review";
+
 export interface ProductsQuery {
   sort?: string;
   limit?: number;
@@ -161,6 +166,7 @@ export interface ProductsQuery {
   period?: number;
   q?: string;
   ads?: "with" | "without";
+  missing?: MissingFilter;
 }
 
 export interface ProductsResponse {
@@ -190,6 +196,35 @@ export interface RoiData {
   has_revenue_data: boolean;
 }
 
+export type ActivityStatus = "active" | "stale" | "inactive";
+
+export interface AdsSection {
+  active: boolean;
+  activity: ActivityStatus;
+  spend: number;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  cpc: number;
+  campaign_name: string | null;
+  scraped_at: string | null;
+}
+
+export interface BonusSection {
+  active: boolean;
+  activity: ActivityStatus;
+  percent: number;
+  campaign_name: string | null;
+  scraped_at: string | null;
+}
+
+export interface ProductSections {
+  marketing: AdsSection;
+  external_ads: AdsSection;
+  bonus_seller: BonusSection;
+  bonus_review: BonusSection;
+}
+
 export interface ProductDetailResponse {
   sku: string;
   title: string | null;
@@ -199,6 +234,7 @@ export interface ProductDetailResponse {
   cpc_efficiency: Record<string, number | null>;
   trends: TrendPoint[];
   latest_data: Record<string, unknown> | null;
+  sections?: ProductSections;
   period_days: number;
   trend_days: number;
 }

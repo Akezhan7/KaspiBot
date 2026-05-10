@@ -16,7 +16,6 @@ import "../styles/pages.css";
 interface Counts {
   topPerformers: number;
   wastedBudget: number;
-  noBonus: number;
   mostClickable: number;
 }
 
@@ -28,7 +27,6 @@ export default function DashboardPage() {
   const [counts, setCounts] = useState<Counts>({
     topPerformers: 0,
     wastedBudget: 0,
-    noBonus: 0,
     mostClickable: 0,
   });
   const [error, setError] = useState<string | null>(null);
@@ -46,15 +44,13 @@ export default function DashboardPage() {
       api.getDashboard(),
       api.getTopPerformers(1).catch(() => ({ count: 0, items: [] })),
       api.getWastedBudget(0).catch(() => ({ count: 0, items: [], threshold: 0 })),
-      api.getNoBonusProducts().catch(() => ({ count: 0, items: [] })),
       api.getMostClickable(1).catch(() => ({ count: 0, items: [] })),
     ])
-      .then(([dash, tp, wb, nb, mc]) => {
+      .then(([dash, tp, wb, mc]) => {
         setData(dash);
         setCounts({
           topPerformers: tp.count ?? tp.items?.length ?? 0,
           wastedBudget: wb.count ?? wb.items?.length ?? 0,
-          noBonus: nb.count ?? nb.items?.length ?? 0,
           mostClickable: mc.count ?? mc.items?.length ?? 0,
         });
       })
@@ -146,7 +142,7 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Навигация — пустые разделы скрываем */}
+      {/* Навигация */}
       <div className="nav-links">
         <NavItem label="Все товары" onClick={() => navigate("/products")} />
         {counts.mostClickable > 0 && (
@@ -154,13 +150,6 @@ export default function DashboardPage() {
             label="Кликабельные"
             badge={counts.mostClickable}
             onClick={() => navigate("/most-clickable")}
-          />
-        )}
-        {counts.noBonus > 0 && (
-          <NavItem
-            label="Без бонусов"
-            badge={counts.noBonus}
-            onClick={() => navigate("/no-bonus")}
           />
         )}
         {counts.topPerformers > 0 && (
@@ -177,6 +166,26 @@ export default function DashboardPage() {
             onClick={() => navigate("/wasted-budget")}
           />
         )}
+      </div>
+
+      <div className="section-header">Что отсутствует</div>
+      <div className="nav-links">
+        <NavItem
+          label="Без рекламы"
+          onClick={() => navigate("/products?missing=ads")}
+        />
+        <NavItem
+          label="Без внешней рекламы"
+          onClick={() => navigate("/products?missing=external")}
+        />
+        <NavItem
+          label="Без бонуса продавца"
+          onClick={() => navigate("/products?missing=bonus_seller")}
+        />
+        <NavItem
+          label="Без бонуса за отзыв"
+          onClick={() => navigate("/products?missing=bonus_review")}
+        />
       </div>
 
       <button

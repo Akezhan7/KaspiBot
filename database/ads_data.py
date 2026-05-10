@@ -228,6 +228,50 @@ class AdsDataDB:
             ) as cursor:
                 return [dict(row) async for row in cursor]
 
+    async def get_active_skus_by_source(
+        self,
+        source: str,
+        period_days: int = 30,
+        require_active_bonus: bool = False,
+        require_spend: bool = False,
+    ) -> set[str]:
+        """SKU, по которым есть свежие активные записи указанного источника.
+
+        Args:
+            source: значение колонки `ads_data.source`
+                (`kaspi_marketing`, `kaspi_external_ads`, `kaspi_bonus_seller`,
+                 `kaspi_bonus_review`, `kaspi_bonus`).
+            period_days: глубина истории в днях.
+            require_active_bonus: True для бонусных источников — учитывать
+                только записи с `bonus_active = 1`.
+            require_spend: True для рекламных источников — учитывать только
+                записи с `spend > 0` (= реклама реально крутилась).
+
+        Returns:
+            Множество SKU. Используется для фильтров «есть/нет реклама/бонус».
+        """
+        conditions = [
+            "source = ?",
+            "scraped_at >= datetime('now', ? || ' days')",
+        ]
+        params: list[Any] = [source, f"-{period_days}"]
+
+        if require_active_bonus:
+            conditions.append("bonus_active = 1")
+        if require_spend:
+            conditions.append("spend > 0")
+
+        where = " AND ".join(conditions)
+        query = f"""
+            SELECT DISTINCT product_sku
+            FROM ads_data
+            WHERE {where}
+        """
+
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, params) as cursor:
+                return {row[0] async for row in cursor if row[0]}
+
     async def get_spend_revenue_summary(
         self,
         period_days: int = 30,

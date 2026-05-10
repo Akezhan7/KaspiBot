@@ -627,3 +627,120 @@ html, body {
   margin: var(--sp-md) 0 var(--sp-sm);
   padding-left: 2px;
 }
+
+/* ── Флажки активности в строке списка товаров ── */
+.product-row-flags {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.flag-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.flag-ads      { background: #0066ff; }
+.flag-external { background: #7c3aed; }
+.flag-seller   { background: #16a34a; }
+.flag-review   { background: #f59e0b; }
+
+/* ── Секции активности на детальной странице ── */
+.sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-sm);
+  margin-bottom: var(--sp-md);
+}
+
+.section-card {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-left: 4px solid var(--text-muted);
+  border-radius: var(--radius-md);
+  padding: 12px var(--sp-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.section-card.section-active   { border-left-color: var(--success); }
+.section-card.section-stale    { border-left-color: var(--warning); }
+.section-card.section-inactive { border-left-color: var(--text-muted); opacity: 0.65; }
+
+.section-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-sm);
+}
+
+.section-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.section-status {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.section-status-active {
+  background: var(--success-bg);
+  color: var(--success);
+}
+.section-status-stale {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+.section-status-inactive {
+  background: var(--border-light);
+  color: var(--text-muted);
+}
+
+.section-card-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-light);
+}
+
+.section-card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-sm);
+  font-size: 13px;
+}
+
+.section-card-label {
+  color: var(--text-muted);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.section-card-value {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+  word-break: break-word;
+}
+
+/* ── Кнопка сброса фильтра ── */
+.filter-clear {
+  width: auto;
+  margin-bottom: var(--sp-sm);
+  padding: 6px 12px;
+  background: var(--accent-light);
+  color: var(--accent);
+  border: 1px solid var(--accent-mid);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
