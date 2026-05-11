@@ -258,6 +258,39 @@ class ProductSellersDB:
             logger.error(f"Ошибка получения товаров продавца {seller_id}: {e}")
             raise
 
+    async def count_links_for_seller(
+        self, seller_id: str
+    ) -> Tuple[int, int]:
+        """
+        Подсчитать связи продавца с товарами.
+
+        Returns:
+            (total, active) — общее число строк (active + inactive)
+            и число активных. Используется для надёжной проверки
+            «продавец был зафиксирован сканером, но сейчас отсоединён».
+        """
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        COALESCE(SUM(is_active), 0) AS active
+                    FROM product_sellers
+                    WHERE seller_id = ?
+                    """,
+                    (seller_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if not row:
+                        return (0, 0)
+                    return (int(row[0]), int(row[1]))
+        except Exception as e:
+            logger.error(
+                f"Ошибка подсчёта связей продавца {seller_id}: {e}"
+            )
+            raise
+
     async def get_other_products_for_seller(
         self, 
         seller_id: str, 

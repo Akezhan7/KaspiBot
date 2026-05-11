@@ -76,17 +76,30 @@ marketing_scraper: MarketingScraper = None
 async def scheduled_scan():
     """Автоматическое сканирование по расписанию"""
     logger = logging.getLogger(__name__)
-    logger.info("🔄 Начало запланированного сканирования")
-    
+    logger.info("Начало запланированного сканирования")
+
     try:
         # Выполнить сканирование
         result = await scanner.scan_all_products()
-        
+
+        # После полного скана: закрыть воронки тех продавцов, кто открепился
+        # от всех карточек (по данным product_sellers). Делается централизованно
+        # один раз после скана, а не реактивно по каждому товару — так не
+        # ловим частичные деактивации в середине скана.
+        if workflow_engine is not None:
+            try:
+                await workflow_engine.close_active_workflows_if_detached()
+            except Exception as close_err:
+                logger.error(
+                    f"Ошибка автозакрытия воронок после скана: {close_err}",
+                    exc_info=True,
+                )
+
         # Отправить уведомления о новых продавцах
         new_sellers = result['new_sellers']
         if new_sellers:
             await notification_service.notify_new_sellers(new_sellers)
-        
+
         # Уведомление о завершении
         await notification_service.notify_scan_complete(
             total=result['total_products'],
@@ -94,7 +107,7 @@ async def scheduled_scan():
             failed=result['failed'],
             new_sellers_count=result['new_sellers_count']
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка запланированного сканирования: {e}", exc_info=True)
         await notification_service.notify_scan_error(str(e))
@@ -176,16 +189,26 @@ async def scheduled_scrape_marketing():
 async def manual_scan_handler(message):
     """Обработчик ручного сканирования через команду /scan"""
     logger = logging.getLogger(__name__)
-    
+
     try:
         # Выполнить сканирование
         result = await scanner.scan_all_products()
-        
+
+        # После полного скана: закрыть воронки тех продавцов, кто открепился.
+        if workflow_engine is not None:
+            try:
+                await workflow_engine.close_active_workflows_if_detached()
+            except Exception as close_err:
+                logger.error(
+                    f"Ошибка автозакрытия воронок после скана: {close_err}",
+                    exc_info=True,
+                )
+
         # Отправить уведомления
         new_sellers = result['new_sellers']
         if new_sellers:
             await notification_service.notify_new_sellers(new_sellers)
-        
+
         # Ответ пользователю
         await message.answer(
             f"<b>Сканирование завершено</b>\n\n"
@@ -194,7 +217,7 @@ async def manual_scan_handler(message):
             f"Новых продавцов: {result['new_sellers_count']}",
             parse_mode="HTML"
         )
-        
+
     except Exception as e:
         logger.error(f"Ошибка ручного сканирования: {e}", exc_info=True)
         await message.answer(f"Ошибка сканирования: {e}")
@@ -298,8 +321,29 @@ async def main():
             media_url=Config.GREEN_API_MEDIA_URL,
         )
         
-        # Инициализация LLM-классификатора
-        classifier = MessageClassifier(api_key=Config.OPENAI_API_KEY)
+        # Инициализация LLM-классификатора.
+        # Подключаем коллбэк уведомления админов о подряд-ошибках OpenAI:
+        # если ключ протух/сервис лёг, мы узнаем об этом за минуты,
+        # а не за дни молчаливой деградации (когда классификатор всегда
+        # возвращает UNKNOWN и бот шлёт REPLY_UNKNOWN-шаблоны).
+        async def _on_classifier_failure(message: str) -> None:
+            try:
+                await notification_service.send_to_admins(
+                    "<b>Ошибка классификатора OpenAI</b>\n\n"
+                    f"<code>{message}</code>\n\n"
+                    "Входящие сообщения временно классифицируются только по "
+                    "ключевым словам (ALREADY_REMOVED / WONT_REMOVE). "
+                    "Проверьте OPENAI_API_KEY."
+                )
+            except Exception as e:
+                logger.error(f"Не удалось доставить уведомление об OpenAI: {e}")
+
+        classifier = MessageClassifier(
+            api_key=Config.OPENAI_API_KEY,
+            model=Config.OPENAI_MODEL,
+            timeout=Config.LLM_CLASSIFICATION_TIMEOUT,
+            on_failure=_on_classifier_failure,
+        )
         
         # Инициализация движка воронки
         workflow_engine = WorkflowEngine(

@@ -175,11 +175,18 @@ class WorkflowEngine:
         if not await self._can_send_message(seller_id, skip_interval_check=True):
             return False
 
-        # Подтянуть все активные товары продавца в workflow
-        await self._sync_workflow_products(workflow_id, seller_id)
-
-        # Подготовка контекста для шаблона
+        # Подготовка контекста: внутри сам подтягивает все актуальные товары
+        # продавца и фильтрует на «реально прилеплён сейчас».
         context = await self._build_template_context(workflow_id, seller)
+        if not context["product_links"]:
+            logger.info(
+                f"WARN1 не отправлен: у продавца {seller_id} нет активных "
+                f"товаров, закрываем workflow {workflow_id}"
+            )
+            await self.close_if_fully_detached(
+                workflow_id, reason="no_active_products_on_warn1"
+            )
+            return False
 
         # Выбор и рендеринг шаблона
         template = get_warn1_template()
@@ -259,10 +266,16 @@ class WorkflowEngine:
         if not await self._can_send_message(seller_id, skip_interval_check=True):
             return False
 
-        # Подтянуть все активные товары продавца в workflow
-        await self._sync_workflow_products(workflow_id, seller_id)
-
         context = await self._build_template_context(workflow_id, seller)
+        if not context["product_links"]:
+            logger.info(
+                f"WARN2 не отправлен: у продавца {seller_id} нет активных "
+                f"товаров, закрываем workflow {workflow_id}"
+            )
+            await self.close_if_fully_detached(
+                workflow_id, reason="no_active_products_on_warn2"
+            )
+            return False
 
         # Добавить дату WARN1 для шаблонов WARN2
         if workflow.get("warn1_sent_at"):
@@ -354,6 +367,18 @@ class WorkflowEngine:
             return
 
         workflow_id = workflow["id"]
+
+        # Упреждающая проверка: если по данным сканера у продавца уже
+        # нет активных товаров, не имеет смысла классифицировать сообщение
+        # и отвечать шаблоном про открепление — сразу закрываем воронку.
+        if await self.close_if_fully_detached(
+            workflow_id, reason="detected_on_incoming"
+        ):
+            logger.info(
+                f"Workflow {workflow_id} ({merchant_name}) закрыт: "
+                f"продавец уже отсоединён по данным БД"
+            )
+            return
 
         # Классифицировать сообщение
         classification_result = await self._classifier.classify(text)
@@ -682,7 +707,24 @@ class WorkflowEngine:
     async def _build_template_context(
         self, workflow_id: int, seller: Dict
     ) -> Dict[str, str]:
-        """Собрать контекст для подстановки в шаблон."""
+        """
+        Собрать контекст для подстановки в шаблон.
+
+        Здесь же синхронизируем workflow_products с актуальным списком
+        активных карточек продавца. Раньше синхронизация была только
+        в send_warn1/send_warn2 — теперь покрываем и авто-ответы, чтобы
+        в рассылке всегда был полный набор карточек, на которых
+        продавец сейчас находится (а не «1-2 первые», которые случайно
+        попали в воронку при создании).
+
+        Если активных товаров и истории воронки нет, product_links
+        окажется пустым — вызывающая сторона должна это проверить и
+        закрыть workflow.
+        """
+        seller_id = seller["merchant_id"]
+
+        await self._sync_workflow_products(workflow_id, seller_id)
+
         products = await self._workflow_db.get_workflow_products(workflow_id)
 
         product_lines = []
@@ -701,6 +743,80 @@ class WorkflowEngine:
             "deadline": "24 часа",
             "detection_date": now_kz().strftime("%d.%m.%Y"),
         }
+
+    async def close_if_fully_detached(
+        self, workflow_id: int, reason: str = "no_active_products"
+    ) -> bool:
+        """
+        Закрыть workflow, если у продавца не осталось активных товаров.
+
+        Опирается на состояние product_sellers (его поддерживает сканер).
+        Дешёвая операция: одна выборка из БД, без обращения к Kaspi.
+
+        Закрываем только когда сканер ЯВНО подтвердил отсоединение, т.е.:
+        - в БД есть строки product_sellers с этим продавцом (хотя бы одна),
+        - и все они is_active=0.
+
+        Если строк нет совсем — это не «отсоединение», а отсутствие данных
+        (например, сразу после ручной правки или в тесте), и мы не имеем
+        права закрывать воронку.
+
+        Возвращает True, если workflow был закрыт.
+        """
+        workflow = await self._workflow_db.get_workflow(workflow_id)
+        if not workflow:
+            return False
+        if workflow.get("status") in ("CLOSED", "READY_FOR_LAWSUIT"):
+            return False
+
+        seller_id = workflow["seller_id"]
+        total_links, active_links = (
+            await self._product_sellers_db.count_links_for_seller(seller_id)
+        )
+        if total_links == 0 or active_links > 0:
+            return False
+
+        await self.close_workflow(workflow_id, reason=reason)
+        return True
+
+    async def close_active_workflows_if_detached(self) -> int:
+        """
+        Пройтись по всем активным workflow и закрыть те, у которых
+        продавец уже не прилеплён ни к одной карточке.
+
+        Используется после полного скана, чтобы воронки не висели до
+        24-часового dialog timeout. Не делает запросов к Kaspi.
+        Возвращает число закрытых workflow.
+        """
+        closed = 0
+        offset = 0
+        page_size = 100
+        while True:
+            page = await self._workflow_db.get_all_active_workflows(
+                limit=page_size, offset=offset
+            )
+            if not page:
+                break
+            for wf in page:
+                try:
+                    if await self.close_if_fully_detached(
+                        wf["id"], reason="detected_by_scanner"
+                    ):
+                        closed += 1
+                except Exception as e:
+                    logger.error(
+                        f"Ошибка автозакрытия workflow {wf.get('id')}: {e}",
+                        exc_info=True,
+                    )
+            if len(page) < page_size:
+                break
+            offset += page_size
+        if closed:
+            logger.info(
+                f"Автозакрытие после скана: закрыто {closed} workflow "
+                f"(продавцы отсоединились)"
+            )
+        return closed
 
     async def _find_seller_by_phone(self, phone: str) -> Optional[Dict]:
         """Найти продавца по нормализованному телефону."""
@@ -734,6 +850,16 @@ class WorkflowEngine:
             return
 
         context = await self._build_template_context(workflow_id, seller)
+        if not context["product_links"]:
+            logger.info(
+                f"Авто-ответ пропущен: у продавца {seller_id} нет активных "
+                f"товаров, закрываем workflow {workflow_id}"
+            )
+            await self.close_if_fully_detached(
+                workflow_id, reason="no_active_products_on_auto_reply"
+            )
+            return
+
         template = get_auto_reply_template(classification)
         text = render_template(template, context)
 

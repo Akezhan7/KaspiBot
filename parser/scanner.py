@@ -58,6 +58,16 @@ class ProductScanner:
         
         # Список новых продавцов для уведомлений
         self.new_sellers: List[NewSellerInfo] = []
+
+        # Идёт ли полный скан прямо сейчас. Эскалация WARN1 проверяет этот
+        # флаг, чтобы не уйти с обрывочным списком товаров посреди скана
+        # (когда продавец на A, B, C, но обработан только A).
+        self._is_scanning: bool = False
+
+    @property
+    def is_scanning(self) -> bool:
+        """True, пока выполняется scan_all_products."""
+        return self._is_scanning
     
     async def scan_product(self, product: Dict[str, Any]) -> bool:
         """
@@ -239,78 +249,82 @@ class ProductScanner:
         logger.info("=" * 50)
         logger.info("НАЧАЛО СКАНИРОВАНИЯ")
         logger.info("=" * 50)
-        
-        # Сброс счетчиков
-        self.proxy_manager.reset_counter()
-        self.new_sellers = []
-        
-        # Создать запись в scan_logs
-        scan_id = await self.scan_logs_db.start_scan()
-        
-        # Получить все товары
-        products = await self.products_db.get_all_products()
-        total_products = len(products)
-        
-        if total_products == 0:
-            logger.warning("Нет товаров для сканирования")
-            await self.scan_logs_db.finish_scan(scan_id, 0, 0, "Нет товаров")
+
+        self._is_scanning = True
+        try:
+            # Сброс счетчиков
+            self.proxy_manager.reset_counter()
+            self.new_sellers = []
+
+            # Создать запись в scan_logs
+            scan_id = await self.scan_logs_db.start_scan()
+
+            # Получить все товары
+            products = await self.products_db.get_all_products()
+            total_products = len(products)
+
+            if total_products == 0:
+                logger.warning("Нет товаров для сканирования")
+                await self.scan_logs_db.finish_scan(scan_id, 0, 0, "Нет товаров")
+                return {
+                    "scan_id": scan_id,
+                    "total_products": 0,
+                    "successful": 0,
+                    "failed": 0,
+                    "new_sellers_count": 0,
+                    "new_sellers": []
+                }
+
+            logger.info(f"Всего товаров для сканирования: {total_products}")
+
+            # Счетчики
+            successful = 0
+            failed = 0
+            errors = []
+
+            # Сканирование
+            for idx, product in enumerate(products, 1):
+                logger.info(f"\n[{idx}/{total_products}] Сканирование: {product['master_sku']}")
+
+                try:
+                    result = await self.scan_product(product)
+                    if result:
+                        successful += 1
+                    else:
+                        failed += 1
+                        errors.append(f"Ошибка товара {product['master_sku']}")
+                except Exception as e:
+                    failed += 1
+                    error_msg = f"Исключение при сканировании {product['master_sku']}: {e}"
+                    errors.append(error_msg)
+                    logger.error(error_msg, exc_info=True)
+
+            # Финализация
+            new_sellers_count = len(self.new_sellers)
+            errors_text = "\n".join(errors[:10]) if errors else None  # Первые 10 ошибок
+
+            await self.scan_logs_db.finish_scan(
+                scan_id, successful, new_sellers_count, errors_text
+            )
+
+            logger.info("=" * 50)
+            logger.info("ЗАВЕРШЕНИЕ СКАНИРОВАНИЯ")
+            logger.info(f"Успешно: {successful}/{total_products}")
+            logger.info(f"Ошибок: {failed}/{total_products}")
+            logger.info(f"Новых продавцов: {new_sellers_count}")
+            logger.info("=" * 50)
+
             return {
                 "scan_id": scan_id,
-                "total_products": 0,
-                "successful": 0,
-                "failed": 0,
-                "new_sellers_count": 0,
-                "new_sellers": []
+                "total_products": total_products,
+                "successful": successful,
+                "failed": failed,
+                "new_sellers_count": new_sellers_count,
+                "new_sellers": self.new_sellers,
+                "errors": errors
             }
-        
-        logger.info(f"Всего товаров для сканирования: {total_products}")
-        
-        # Счетчики
-        successful = 0
-        failed = 0
-        errors = []
-        
-        # Сканирование
-        for idx, product in enumerate(products, 1):
-            logger.info(f"\n[{idx}/{total_products}] Сканирование: {product['master_sku']}")
-            
-            try:
-                result = await self.scan_product(product)
-                if result:
-                    successful += 1
-                else:
-                    failed += 1
-                    errors.append(f"Ошибка товара {product['master_sku']}")
-            except Exception as e:
-                failed += 1
-                error_msg = f"Исключение при сканировании {product['master_sku']}: {e}"
-                errors.append(error_msg)
-                logger.error(error_msg, exc_info=True)
-        
-        # Финализация
-        new_sellers_count = len(self.new_sellers)
-        errors_text = "\n".join(errors[:10]) if errors else None  # Первые 10 ошибок
-        
-        await self.scan_logs_db.finish_scan(
-            scan_id, successful, new_sellers_count, errors_text
-        )
-        
-        logger.info("=" * 50)
-        logger.info("ЗАВЕРШЕНИЕ СКАНИРОВАНИЯ")
-        logger.info(f"Успешно: {successful}/{total_products}")
-        logger.info(f"Ошибок: {failed}/{total_products}")
-        logger.info(f"Новых продавцов: {new_sellers_count}")
-        logger.info("=" * 50)
-        
-        return {
-            "scan_id": scan_id,
-            "total_products": total_products,
-            "successful": successful,
-            "failed": failed,
-            "new_sellers_count": new_sellers_count,
-            "new_sellers": self.new_sellers,
-            "errors": errors
-        }
+        finally:
+            self._is_scanning = False
     
     def get_new_sellers(self) -> List[NewSellerInfo]:
         """Получить список новых продавцов из последнего сканирования"""
