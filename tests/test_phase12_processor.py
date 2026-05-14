@@ -247,17 +247,23 @@ async def test_get_bonuses_status_returns_latest_per_sku(ads_db):
 
 
 @pytest.mark.asyncio
-async def test_get_spend_revenue_summary_aggregates_multiple_rows(ads_db):
-    """Несколько записей одного SKU суммируются в одну строку."""
+async def test_get_spend_revenue_summary_returns_latest_snapshot(ads_db):
+    """Возвращается **последний** XLSX-снапшот по SKU, не сумма по дням.
+
+    Каждая запись `ads_data` уже содержит агрегат за `period_days` дней
+    (так его строит скрапер). Суммирование таких снапшотов давало бы
+    значение в N раз больше реального — поэтому DAO теперь берёт latest.
+    """
     await _insert(ads_db, "AGG-SKU", spend=100.0, revenue=300.0, clicks=10)
+    # Более свежий снапшот — он и должен попасть в результат.
     await _insert(ads_db, "AGG-SKU", spend=200.0, revenue=600.0, clicks=20)
 
     rows = await ads_db.get_spend_revenue_summary(period_days=30, sku="AGG-SKU")
 
     assert len(rows) == 1
-    assert rows[0]["total_spend"] == pytest.approx(300.0)
-    assert rows[0]["total_revenue"] == pytest.approx(900.0)
-    assert rows[0]["total_clicks"] == 30
+    assert rows[0]["total_spend"] == pytest.approx(200.0)
+    assert rows[0]["total_revenue"] == pytest.approx(600.0)
+    assert rows[0]["total_clicks"] == 20
 
 
 @pytest.mark.asyncio

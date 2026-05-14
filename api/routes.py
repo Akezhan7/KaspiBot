@@ -32,6 +32,7 @@ API маршруты TMA Dashboard.
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -163,6 +164,33 @@ def _parse_sort_param(request: web.Request, default: str = "spend_desc") -> str:
     return sort if sort in _ALLOWED_SORT_KEYS else default
 
 
+# Реальный товарный SKU в Kaspi: только цифры, 5-12 разрядов.
+# Surrogate-коды скрапера (`RPT-XXXXXXXX`, `CMP-…`, хеш-строки) этому формату
+# не удовлетворяют и в каталог не попадают.
+_REAL_SKU_RE = re.compile(r"^\d{5,12}$")
+
+
+def _is_real_product_sku(sku: str | None) -> bool:
+    """Проверка: похоже ли значение на настоящий товарный SKU Kaspi."""
+    if not sku:
+        return False
+    return bool(_REAL_SKU_RE.match(sku.strip()))
+
+
+def _has_ad_activity(summary: dict) -> bool:
+    """Есть ли в свежем snapshot реальные рекламные метрики.
+
+    Достаточно одной ненулевой метрики (impressions/clicks/spend) — это
+    означает, что товар реально присутствует в рекламном кабинете
+    («неактивные» строки и нулевые агрегаты отсекаются).
+    """
+    return (
+        _safe_float(summary.get("total_spend")) > 0
+        or _safe_int(summary.get("total_clicks")) > 0
+        or _safe_int(summary.get("total_impressions")) > 0
+    )
+
+
 def _sort_items_by(items: list[dict], sort_key: str) -> list[dict]:
     """Сортировка списка товаров по ключу."""
     sort_map: dict[str, tuple] = {
@@ -241,10 +269,14 @@ async def _build_products_list(
 ) -> list[dict]:
     """Собрать и отфильтровать список товаров с рекламными метриками.
 
-    Каталог = объединение `products` (товары витрины) + всех SKU из
-    `ads_data` за `period` дней. Это закрывает кейс «в кабинете 634, а в
-    products только 558»: товары, попавшие в рекламный кабинет, но ещё не
-    в каталог витрины, всё равно показываются.
+    Каталог = `products` (витрина) + те SKU из `ads_data`, у которых:
+      - корректный товарный формат (5-12 цифр), И
+      - есть рекламная активность (последний snapshot.spend > 0 ИЛИ есть
+        импрешены/клики).
+
+    Surrogate-SKU вида `RPT-…` (которые скрапер генерирует когда не видит
+    реальный артикул в строке XLSX) — отбрасываются: пользователь всё
+    равно не сможет идентифицировать такой «товар».
 
     Используется и `/api/products` (с пагинацией), и
     `/api/products/export.xlsx` (полная выгрузка) — единая точка фильтрации
@@ -255,33 +287,40 @@ async def _build_products_list(
     else:
         catalog = await products_db.get_all_products()
 
-    # Объединяем каталог витрины с SKU, которые есть только в рекламных
-    # отчётах (без записи в таблице products).
-    ads_skus_with_names = await ads_db.get_all_recent_skus_with_names(period_days=period)
-    catalog_skus = {p["master_sku"] for p in catalog}
-    q_lower = query_text.lower().strip()
-
-    extra_catalog: list[dict] = []
-    for sku, name in ads_skus_with_names.items():
-        if sku in catalog_skus:
-            continue
-        # Если задан поиск — фильтруем "лишние" SKU из ads_data тоже.
-        if q_lower and q_lower not in sku.lower() and q_lower not in (name or "").lower():
-            continue
-        extra_catalog.append({
-            "master_sku": sku,
-            "title": name or sku,
-            "url": None,
-        })
-
-    combined_catalog = list(catalog) + extra_catalog
-
     ads_summaries: dict[str, dict] = {
         row["product_sku"]: row
         for row in await ads_db.get_spend_revenue_summary(
             period_days=period, report_period=report_period,
         )
     }
+
+    # Расширяем каталог: добавляем только реальные товарные SKU, на которые
+    # реально тратят деньги. Бот сам по себе уже парсит **активные**
+    # рекламные кампании, поэтому SKU из ads_data с spend>0 = это реально
+    # рекламируемый товар (не наложенная аналитика, не агрегат-строка).
+    catalog_skus = {p["master_sku"] for p in catalog}
+    ads_names = await ads_db.get_all_recent_skus_with_names(period_days=period)
+    q_lower = query_text.lower().strip()
+
+    extra_catalog: list[dict] = []
+    for sku, summary in ads_summaries.items():
+        if sku in catalog_skus:
+            continue
+        if not _is_real_product_sku(sku):
+            continue
+        # Должна быть рекламная активность в свежем snapshot.
+        if not _has_ad_activity(summary):
+            continue
+        name = ads_names.get(sku) or sku
+        if q_lower and q_lower not in sku.lower() and q_lower not in name.lower():
+            continue
+        extra_catalog.append({
+            "master_sku": sku,
+            "title": name,
+            "url": None,
+        })
+
+    combined_catalog = list(catalog) + extra_catalog
 
     external_skus = await ads_db.get_active_skus_by_source(
         _SRC_EXTERNAL, period_days=period, require_spend=True,

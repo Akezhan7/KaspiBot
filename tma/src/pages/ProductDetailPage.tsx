@@ -9,9 +9,9 @@
  *
  * ROI/ROAS не показываем — Kaspi не отдаёт revenue.
  */
-import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
-import { CircleX, Gift } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { ArrowLeft, CircleX, Gift } from "lucide-react";
 import {
   LineChart,
   Line,
@@ -44,9 +44,33 @@ function readReportPeriod(): ReportPeriod {
   }
 }
 
+/** Получить URL для возврата к списку по приоритету:
+ *   1) `location.state.returnTo` — самое надёжное, явно прокидывается при
+ *      переходе в детальную.
+ *   2) `sessionStorage` — переживает SPA-навигацию внутри одной сессии.
+ *   3) Жёсткий дефолт `/products`.
+ *
+ *  Такая цепочка работает в трёх сценариях: системная «назад» в TG, кнопка
+ *  «← К списку» на странице, и прямое открытие товара по ссылке (тогда мы
+ *  хотя бы вернёмся на чистый список).
+ */
+function resolveReturnTo(stateValue: unknown): string {
+  if (typeof stateValue === "string" && stateValue.startsWith("/products")) {
+    return stateValue;
+  }
+  try {
+    const stored = sessionStorage.getItem(PRODUCTS_LIST_URL_STORAGE_KEY);
+    if (stored) return stored;
+  } catch {
+    // sessionStorage недоступен — fall through
+  }
+  return "/products";
+}
+
 export default function ProductDetailPage() {
   const { sku } = useParams<{ sku: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const api = useApi();
   const { showBackButton } = useTelegram();
 
@@ -54,22 +78,14 @@ export default function ProductDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const goBack = useCallback(() => {
+    const stateReturnTo = (location.state as { returnTo?: unknown } | null)?.returnTo;
+    navigate(resolveReturnTo(stateReturnTo));
+  }, [navigate, location.state]);
+
   useEffect(() => {
-    // navigate(-1) ненадёжен в Telegram WebApp: история может быть пустой
-    // (при прямом переходе на детальную страницу) или сбиваться при
-    // обновлениях URL через `replace`. Восстанавливаем явный URL списка
-    // из sessionStorage, который ProductsPage сохраняет на каждом
-    // изменении фильтра/страницы.
-    showBackButton(() => {
-      let target = "/products";
-      try {
-        target = sessionStorage.getItem(PRODUCTS_LIST_URL_STORAGE_KEY) || target;
-      } catch {
-        // sessionStorage может быть недоступен — используем дефолт
-      }
-      navigate(target);
-    });
-  }, [showBackButton, navigate]);
+    showBackButton(goBack);
+  }, [showBackButton, goBack]);
 
   useEffect(() => {
     if (!api || !sku) return;
@@ -106,6 +122,15 @@ export default function ProductDetailPage() {
 
   return (
     <div className="page">
+      <button
+        type="button"
+        className="back-link"
+        onClick={goBack}
+        aria-label="К списку товаров"
+      >
+        <ArrowLeft size={14} />
+        <span>К списку</span>
+      </button>
       <h1 className="page-title">{data.title ?? data.sku}</h1>
       <div className="sku-label">{data.sku}</div>
 

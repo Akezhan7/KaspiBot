@@ -342,16 +342,28 @@ class AdsDataDB:
         sku: str | None = None,
         report_period: int | None = None,
     ) -> list[dict]:
-        """Агрегированные spend/revenue/clicks/impressions по SKU за период.
+        """Свежайший XLSX-снапшот по каждому SKU.
+
+        Семантика: каждая запись `ads_data` уже содержит агрегат за
+        `period_days` дней (так его строит скрапер из отчёта Kaspi). Поэтому
+        правильный «итог за period_days» — это **последний снапшот** по SKU,
+        а не SUM по всем дням истории.
+
+        Старая реализация суммировала `spend` по всем дневным снапшотам за
+        `period_days` → искусственно надувала цифры в десятки раз.
 
         Args:
             period_days: глубина истории в днях (фильтр по scraped_at).
+                Снапшот старше — игнорируется (товар, для которого парсинг
+                давно не запускался, выпадает из агрегата).
             sku: ограничить выборку одним SKU.
             report_period: фильтр по period_days (7 или 30). None = берём
-                свежайшую запись каждого дня независимо от report-периода.
+                самый свежий снапшот любого report-периода.
 
         Возвращает: product_sku, total_spend, total_revenue, total_clicks,
-                    total_impressions, total_orders, avg_ctr, avg_cpc
+                    total_impressions, total_orders, avg_ctr, avg_cpc.
+        Названия полей сохранены для совместимости с вызывающим кодом —
+        фактически это значения из одной строки последнего снапшота.
         """
         sku_filter = "AND product_sku = ?" if sku else ""
         report_filter = "AND period_days = ?" if report_period is not None else ""
@@ -361,14 +373,12 @@ class AdsDataDB:
         if report_period is not None:
             params.append(report_period)
 
-        # Дедупликация: берём только последнюю строку за каждый (sku, день) чтобы исключить
-        # задвоение при повторных запусках скрапера в один день.
         query = f"""
-            WITH deduped AS (
+            WITH ranked AS (
                 SELECT *,
                        ROW_NUMBER() OVER (
-                           PARTITION BY product_sku, date(scraped_at)
-                           ORDER BY id DESC
+                           PARTITION BY product_sku
+                           ORDER BY scraped_at DESC, id DESC
                        ) AS rn
                 FROM ads_data
                 WHERE source = 'kaspi_marketing'
@@ -377,16 +387,15 @@ class AdsDataDB:
                   {report_filter}
             )
             SELECT product_sku,
-                   SUM(spend)       AS total_spend,
-                   SUM(revenue)     AS total_revenue,
-                   SUM(clicks)      AS total_clicks,
-                   SUM(impressions) AS total_impressions,
-                   SUM(orders)      AS total_orders,
-                   AVG(ctr)         AS avg_ctr,
-                   AVG(cpc)         AS avg_cpc
-            FROM deduped
+                   COALESCE(spend, 0)       AS total_spend,
+                   COALESCE(revenue, 0)     AS total_revenue,
+                   COALESCE(clicks, 0)      AS total_clicks,
+                   COALESCE(impressions, 0) AS total_impressions,
+                   COALESCE(orders, 0)      AS total_orders,
+                   COALESCE(ctr, 0)         AS avg_ctr,
+                   COALESCE(cpc, 0)         AS avg_cpc
+            FROM ranked
             WHERE rn = 1
-            GROUP BY product_sku
             ORDER BY total_spend DESC
         """
 

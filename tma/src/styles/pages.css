@@ -603,6 +603,28 @@ html, body {
   font-weight: 500;
 }
 
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: var(--sp-sm);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  background: transparent;
+  color: var(--accent);
+  border: 1.5px solid var(--accent-mid);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.back-link:hover,
+.back-link:focus-visible {
+  background: var(--accent-light);
+  outline: none;
+}
+
 .pagination {
   display: flex;
   align-items: center;

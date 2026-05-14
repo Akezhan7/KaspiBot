@@ -11,7 +11,7 @@
  *                                                    нет указанного признака
  */
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import type {
   MissingFilter,
   ProductItem,
@@ -62,6 +62,7 @@ function parseReportPeriod(v: string | null): ReportPeriod {
 
 export default function ProductsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const api = useApi();
   const { showBackButton } = useTelegram();
 
@@ -295,7 +296,15 @@ export default function ProductsPage() {
               <ProductRow
                 key={item.sku}
                 item={item}
-                onClick={() => navigate(`/products/${encodeURIComponent(item.sku)}`)}
+                onClick={() => {
+                  // Передаём текущий URL списка в state навигации — детальная
+                  // страница вернётся именно сюда, независимо от того что
+                  // лежит в sessionStorage и как себя ведёт TG BackButton.
+                  const returnTo = location.pathname + location.search;
+                  navigate(`/products/${encodeURIComponent(item.sku)}`, {
+                    state: { returnTo },
+                  });
+                }}
               />
             ))
           )}
