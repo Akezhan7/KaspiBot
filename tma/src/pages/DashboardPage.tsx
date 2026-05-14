@@ -4,10 +4,10 @@
  * Вкладки скрываются, если по ним нет данных (top-performers, wasted-budget,
  * no-bonus, most-clickable) — чтобы пользователь не тыкал в пустоту.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle, BadgeX } from "lucide-react";
-import type { DashboardResponse } from "../api/client";
+import type { DashboardResponse, ReportPeriod } from "../api/client";
 import { ApiError } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
@@ -17,6 +17,15 @@ interface Counts {
   topPerformers: number;
   wastedBudget: number;
   mostClickable: number;
+}
+
+const REPORT_PERIODS: ReportPeriod[] = [7, 30];
+const REPORT_PERIOD_STORAGE_KEY = "kaspibot.reportPeriod";
+
+function readStoredReportPeriod(): ReportPeriod {
+  if (typeof window === "undefined") return 7;
+  const raw = Number(localStorage.getItem(REPORT_PERIOD_STORAGE_KEY));
+  return REPORT_PERIODS.includes(raw as ReportPeriod) ? (raw as ReportPeriod) : 7;
 }
 
 export default function DashboardPage() {
@@ -32,6 +41,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [triggering, setTriggering] = useState(false);
+  const [reportPeriod, setReportPeriod] = useState<ReportPeriod>(readStoredReportPeriod);
 
   useEffect(() => {
     hideBackButton();
@@ -39,9 +49,10 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (!api) return;
+    setLoading(true);
 
     Promise.all([
-      api.getDashboard(),
+      api.getDashboard({ report_period: reportPeriod }),
       api.getTopPerformers(1).catch(() => ({ count: 0, items: [] })),
       api.getWastedBudget(0).catch(() => ({ count: 0, items: [], threshold: 0 })),
       api.getMostClickable(1).catch(() => ({ count: 0, items: [] })),
@@ -56,7 +67,16 @@ export default function DashboardPage() {
       })
       .catch((err: ApiError | Error) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [api]);
+  }, [api, reportPeriod]);
+
+  const handleReportPeriodChange = useCallback((next: ReportPeriod) => {
+    setReportPeriod(next);
+    try {
+      localStorage.setItem(REPORT_PERIOD_STORAGE_KEY, String(next));
+    } catch {
+      // localStorage недоступен — не критично
+    }
+  }, []);
 
   const handleTriggerScrape = async () => {
     if (!api || triggering) return;
@@ -85,6 +105,25 @@ export default function DashboardPage() {
   return (
     <div className="page">
       <h1 className="page-title">Kaspi Ads</h1>
+
+      <div className="toolbar-row">
+        <div
+          className="period-toggle"
+          role="group"
+          aria-label="Период отчёта"
+        >
+          {REPORT_PERIODS.map((p) => (
+            <button
+              key={p}
+              type="button"
+              className={`period-toggle-btn${p === reportPeriod ? " active" : ""}`}
+              onClick={() => handleReportPeriodChange(p)}
+            >
+              {p} дн
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* Алерты — только если в них есть смысл */}
       {alerts.length > 0 && (

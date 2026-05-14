@@ -127,20 +127,28 @@ class DataAggregator:
 
         return result
 
-    async def get_total_stats(self) -> dict:
+    async def get_total_stats(self, report_period: int | None = None) -> dict:
         """Общие метрики по всем товарам за последние 30 дней.
+
+        Args:
+            report_period: 7 | 30 — длина окна XLSX-отчёта. Если задан, в
+                агрегат идут только записи `ads_data.period_days = report_period`.
+                None = берём свежайший снапшот любого периода (для совместимости).
 
         Includes:
           total_spend, avg_cpc, avg_ctr,
           products_with_ads (уникальных SKU с рекламой),
           products_without_bonuses
         """
-        summaries = await self._ads_db.get_spend_revenue_summary(period_days=30)
+        summaries = await self._ads_db.get_spend_revenue_summary(
+            period_days=30, report_period=report_period,
+        )
         no_bonus = await self._ads_db.get_products_without_bonuses()
 
         if not summaries:
             return {
                 "period_days": 30,
+                "report_period": report_period,
                 "total_spend": 0.0,
                 "total_revenue": 0.0,
                 "avg_cpc": 0.0,
@@ -160,6 +168,7 @@ class DataAggregator:
 
         return {
             "period_days": 30,
+            "report_period": report_period,
             "total_spend": round(total_spend, 2),
             "total_revenue": round(total_revenue, 2),
             "avg_cpc": round(avg_cpc, 2),

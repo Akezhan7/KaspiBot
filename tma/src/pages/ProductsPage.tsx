@@ -20,7 +20,13 @@ import type {
 } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
+import Pagination from "../components/Pagination";
 import "../styles/pages.css";
+
+/** Ключ в sessionStorage, в который сохраняется URL последнего состояния
+ *  списка товаров — используется ProductDetailPage чтобы вернуться на ту же
+ *  страницу/фильтр после системной кнопки «назад». */
+export const PRODUCTS_LIST_URL_STORAGE_KEY = "kaspibot.productsListUrl";
 
 const SORT_OPTIONS = [
   { value: "spend_desc", label: "По затратам ↓" },
@@ -89,6 +95,19 @@ export default function ProductsPage() {
   useEffect(() => {
     showBackButton(() => navigate("/"));
   }, [showBackButton, navigate]);
+
+  // Сохраняем текущий URL списка чтобы детальная страница могла вернуться
+  // в точности к тому же фильтру/странице. URL берётся из живых params
+  // (не из window.location, чтобы это работало и в SSR / non-browser окружениях).
+  useEffect(() => {
+    try {
+      const search = params.toString();
+      const url = search ? `/products?${search}` : "/products";
+      sessionStorage.setItem(PRODUCTS_LIST_URL_STORAGE_KEY, url);
+    } catch {
+      // sessionStorage может быть недоступен — не критично
+    }
+  }, [params]);
 
   // debounce ввода поиска -> в URL
   useEffect(() => {
@@ -283,25 +302,17 @@ export default function ProductsPage() {
         </div>
       )}
 
-      {totalPages > 1 && (
-        <div className="pagination">
-          <button
-            className="btn btn-sm"
-            disabled={offset === 0}
-            onClick={() => updateParam("offset", String(Math.max(0, offset - PAGE_SIZE)))}
-          >
-            ‹ Пред
-          </button>
-          <span className="page-info">{currentPage} / {totalPages}</span>
-          <button
-            className="btn btn-sm"
-            disabled={offset + PAGE_SIZE >= total}
-            onClick={() => updateParam("offset", String(offset + PAGE_SIZE))}
-          >
-            След ›
-          </button>
-        </div>
-      )}
+      <Pagination
+        currentPage={currentPage}
+        totalPages={totalPages}
+        onPageChange={(p) => {
+          const nextOffset = (p - 1) * PAGE_SIZE;
+          updateParam("offset", nextOffset > 0 ? String(nextOffset) : null);
+          // Прокрутить наверх — иначе при переходе на следующую страницу
+          // пользователь оказывается в середине нового списка.
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }}
+      />
     </div>
   );
 }

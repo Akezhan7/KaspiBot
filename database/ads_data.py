@@ -240,6 +240,52 @@ class AdsDataDB:
             ) as cursor:
                 return [dict(row) async for row in cursor]
 
+    async def get_all_recent_skus_with_names(
+        self,
+        period_days: int = 30,
+    ) -> dict[str, str | None]:
+        """Все уникальные SKU из ads_data за период + их самое свежее название.
+
+        Используется чтобы расширить каталог `products` товарами, которые
+        присутствуют в рекламном кабинете, но ещё не попали в основную
+        таблицу products (обычно из-за того что каталог инициализируется
+        парсером витрины отдельно и обновляется реже).
+
+        Args:
+            period_days: глубина истории в днях.
+
+        Returns:
+            Словарь {product_sku: product_name | None}. Берётся самое свежее
+            непустое значение product_name по каждому SKU.
+        """
+        query = """
+            WITH ranked AS (
+                SELECT product_sku,
+                       product_name,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY product_sku
+                           ORDER BY
+                               CASE WHEN product_name IS NULL OR product_name = '' THEN 1 ELSE 0 END,
+                               scraped_at DESC,
+                               id DESC
+                       ) AS rn
+                FROM ads_data
+                WHERE scraped_at >= datetime('now', ? || ' days')
+            )
+            SELECT product_sku, product_name
+            FROM ranked
+            WHERE rn = 1
+        """
+        result: dict[str, str | None] = {}
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(query, [f"-{period_days}"]) as cursor:
+                async for row in cursor:
+                    sku = row[0]
+                    if not sku:
+                        continue
+                    result[sku] = row[1] or None
+        return result
+
     async def get_active_skus_by_source(
         self,
         source: str,

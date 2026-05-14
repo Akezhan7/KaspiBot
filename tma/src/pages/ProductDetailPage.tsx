@@ -30,6 +30,7 @@ import type {
 } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { useTelegram } from "../hooks/useTelegram";
+import { PRODUCTS_LIST_URL_STORAGE_KEY } from "./ProductsPage";
 import "../styles/pages.css";
 
 const REPORT_PERIOD_STORAGE_KEY = "kaspibot.reportPeriod";
@@ -54,7 +55,20 @@ export default function ProductDetailPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    showBackButton(() => navigate(-1));
+    // navigate(-1) ненадёжен в Telegram WebApp: история может быть пустой
+    // (при прямом переходе на детальную страницу) или сбиваться при
+    // обновлениях URL через `replace`. Восстанавливаем явный URL списка
+    // из sessionStorage, который ProductsPage сохраняет на каждом
+    // изменении фильтра/страницы.
+    showBackButton(() => {
+      let target = "/products";
+      try {
+        target = sessionStorage.getItem(PRODUCTS_LIST_URL_STORAGE_KEY) || target;
+      } catch {
+        // sessionStorage может быть недоступен — используем дефолт
+      }
+      navigate(target);
+    });
   }, [showBackButton, navigate]);
 
   useEffect(() => {

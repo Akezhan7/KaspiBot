@@ -607,7 +607,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--sp-md);
+  flex-wrap: wrap;
+  gap: 4px;
   padding: var(--sp-md) 0;
 }
 
@@ -615,6 +616,73 @@ html, body {
   font-size: 13px;
   color: var(--text-muted);
   font-weight: 500;
+}
+
+.page-btn {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--surface);
+  color: var(--text-secondary);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.page-btn:hover:not(:disabled) {
+  background: var(--accent-light);
+  color: var(--accent);
+  border-color: var(--accent-mid);
+}
+
+.page-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.page-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  cursor: default;
+}
+
+.page-ellipsis {
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.page-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.page-jump-input {
+  width: 48px;
+  height: 32px;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
+.page-jump-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.page-jump-total {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 /* ── Секции-разделители ── */

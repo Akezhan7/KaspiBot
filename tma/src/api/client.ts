@@ -67,7 +67,11 @@ export function createApiClient(initData: string) {
 
   return {
     /** GET /api/dashboard */
-    getDashboard: () => get<DashboardResponse>("/api/dashboard"),
+    getDashboard: (params?: { report_period?: ReportPeriod }) =>
+      get<DashboardResponse>(
+        "/api/dashboard",
+        params as Record<string, number> | undefined,
+      ),
 
     /** GET /api/products */
     getProducts: (params: ProductsQuery) =>

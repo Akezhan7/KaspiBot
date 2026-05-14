@@ -170,12 +170,21 @@ class AdsAnalyticsProcessor:
     # Метрики на уровне всей коллекции товаров
     # -------------------------------------------------------------------------
 
-    async def get_wasted_budget(self, threshold_roi: float = 0.0) -> list[dict]:
+    async def get_wasted_budget(
+        self,
+        threshold_roi: float = 0.0,
+        report_period: int | None = None,
+    ) -> list[dict]:
         """Товары с ROI ниже порога (по умолчанию < 0 — убыточная реклама).
+
+        Args:
+            report_period: 7 | 30 — фильтрует выборку по `ads_data.period_days`.
 
         Returns список dict: sku, spend, revenue, roi_percent, sorted by spend DESC.
         """
-        summaries = await self._ads_db.get_spend_revenue_summary(period_days=30)
+        summaries = await self._ads_db.get_spend_revenue_summary(
+            period_days=30, report_period=report_period,
+        )
         wasted: list[dict] = []
 
         for row in summaries:
@@ -207,13 +216,19 @@ class AdsAnalyticsProcessor:
         wasted.sort(key=lambda x: x["spend"], reverse=True)
         return wasted
 
-    async def get_top_performers(self, limit: int = 20) -> list[dict]:
+    async def get_top_performers(
+        self,
+        limit: int = 20,
+        report_period: int | None = None,
+    ) -> list[dict]:
         """Топ товаров по ROAS (выручка / затраты).
 
         Включает только товары, у которых есть данные о выручке (revenue > 0).
         Returns список dict: sku, spend, revenue, roas, clicks, sorted by roas DESC.
         """
-        summaries = await self._ads_db.get_spend_revenue_summary(period_days=30)
+        summaries = await self._ads_db.get_spend_revenue_summary(
+            period_days=30, report_period=report_period,
+        )
         performers: list[dict] = []
 
         for row in summaries:
@@ -239,8 +254,17 @@ class AdsAnalyticsProcessor:
         performers.sort(key=lambda x: x["roas"], reverse=True)
         return performers[:limit]
 
-    async def get_no_bonus_products(self, period_days: int = 30) -> list[dict]:
+    async def get_no_bonus_products(
+        self,
+        period_days: int = 30,
+        report_period: int | None = None,
+    ) -> list[dict]:
         """Товары с рекламой, но без активного бонуса.
+
+        Args:
+            period_days: глубина истории scraped_at.
+            report_period: 7 | 30 — фильтрует выборку рекламы по report-периоду
+                (для бонусов фильтр не нужен — это моментальный статус).
 
         Логика:
           1. Берём все SKU из ads_data WHERE source='kaspi_marketing' за период
@@ -252,7 +276,9 @@ class AdsAnalyticsProcessor:
         Returns список dict: sku, title, total_impressions, total_clicks, total_spend.
         Сортировка по spend DESC — приоритет проблемных товаров.
         """
-        marketing_rows = await self._ads_db.get_spend_revenue_summary(period_days=period_days)
+        marketing_rows = await self._ads_db.get_spend_revenue_summary(
+            period_days=period_days, report_period=report_period,
+        )
         bonus_rows = await self._ads_db.get_bonuses_status()
 
         active_bonus_skus: set[str] = {

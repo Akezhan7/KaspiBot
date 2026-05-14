@@ -183,16 +183,26 @@ def _sort_items_by(items: list[dict], sort_key: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 async def _handle_dashboard(request: web.Request) -> web.Response:
-    """GET /api/dashboard — главная сводка: общие метрики + сигналы."""
+    """GET /api/dashboard — главная сводка: общие метрики + сигналы.
+
+    Query params:
+        report_period: 7 | 30 — окно XLSX-отчёта, по которому считать траты
+            и сигналы. По умолчанию 7 (как в /api/products).
+    """
     deps = request.app[_DEPS_KEY]
     processor: "AdsAnalyticsProcessor" = deps["processor"]
     aggregator: "DataAggregator" = deps["aggregator"]
+    report_period = _parse_report_period(request)
 
     try:
-        total_stats = await aggregator.get_total_stats()
+        total_stats = await aggregator.get_total_stats(report_period=report_period)
         daily = await aggregator.aggregate_daily()
-        wasted = await processor.get_wasted_budget(threshold_roi=0.0)
-        no_bonus = await processor.get_no_bonus_products()
+        wasted = await processor.get_wasted_budget(
+            threshold_roi=0.0, report_period=report_period,
+        )
+        no_bonus = await processor.get_no_bonus_products(
+            report_period=report_period,
+        )
 
         alerts = []
         if wasted:
@@ -231,6 +241,11 @@ async def _build_products_list(
 ) -> list[dict]:
     """Собрать и отфильтровать список товаров с рекламными метриками.
 
+    Каталог = объединение `products` (товары витрины) + всех SKU из
+    `ads_data` за `period` дней. Это закрывает кейс «в кабинете 634, а в
+    products только 558»: товары, попавшие в рекламный кабинет, но ещё не
+    в каталог витрины, всё равно показываются.
+
     Используется и `/api/products` (с пагинацией), и
     `/api/products/export.xlsx` (полная выгрузка) — единая точка фильтрации
     исключает расхождения между UI и экспортом.
@@ -239,6 +254,27 @@ async def _build_products_list(
         catalog = await products_db.search_products(query_text)
     else:
         catalog = await products_db.get_all_products()
+
+    # Объединяем каталог витрины с SKU, которые есть только в рекламных
+    # отчётах (без записи в таблице products).
+    ads_skus_with_names = await ads_db.get_all_recent_skus_with_names(period_days=period)
+    catalog_skus = {p["master_sku"] for p in catalog}
+    q_lower = query_text.lower().strip()
+
+    extra_catalog: list[dict] = []
+    for sku, name in ads_skus_with_names.items():
+        if sku in catalog_skus:
+            continue
+        # Если задан поиск — фильтруем "лишние" SKU из ads_data тоже.
+        if q_lower and q_lower not in sku.lower() and q_lower not in (name or "").lower():
+            continue
+        extra_catalog.append({
+            "master_sku": sku,
+            "title": name or sku,
+            "url": None,
+        })
+
+    combined_catalog = list(catalog) + extra_catalog
 
     ads_summaries: dict[str, dict] = {
         row["product_sku"]: row
@@ -251,29 +287,27 @@ async def _build_products_list(
         _SRC_EXTERNAL, period_days=period, require_spend=True,
         report_period=report_period,
     )
+    # Бонусы: report_period не передаём — бонус это моментальный статус,
+    # не зависящий от 7/30-дневного окна отчёта.
     bonus_seller_skus = (
         await ads_db.get_active_skus_by_source(
             _SRC_BONUS_SELLER, period_days=period, require_active_bonus=True,
-            report_period=report_period,
         )
         | await ads_db.get_active_skus_by_source(
             _SRC_BONUS_LEGACY, period_days=period, require_active_bonus=True,
-            report_period=report_period,
         )
     )
     bonus_review_skus = (
         await ads_db.get_active_skus_by_source(
             _SRC_BONUS_REVIEW, period_days=period, require_active_bonus=True,
-            report_period=report_period,
         )
         | await ads_db.get_active_skus_by_source(
             _SRC_BONUS_LEGACY, period_days=period, require_active_bonus=True,
-            report_period=report_period,
         )
     )
 
     items: list[dict] = []
-    for product in catalog:
+    for product in combined_catalog:
         sku = product["master_sku"]
         ads = ads_summaries.get(sku, {})
         has_ads = sku in ads_summaries
@@ -479,6 +513,23 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
     trend_days = _parse_int_param(request, "trend_days", 30, 7, 90)
     report_period = _parse_report_period(request)
 
+    async def _latest_with_fallback(source: str, with_period: bool) -> dict | None:
+        """Берём свежайшую запись по source.
+
+        Для рекламных секций сначала пробуем с фильтром по report_period; если
+        точного снапшота за выбранный период нет — возвращаем самую свежую
+        вообще. Это критично сразу после миграции (когда в БД ещё нет 30д
+        снапшотов) и для бонусов (для них period_days не имеет физического
+        смысла — бонус активен в моменте, а не "за 7 дней").
+        """
+        if with_period:
+            row = await ads_db.get_latest_by_sku(
+                sku, source=source, report_period=report_period,
+            )
+            if row is not None:
+                return row
+        return await ads_db.get_latest_by_sku(sku, source=source)
+
     try:
         product = await products_db.get_product(sku)
 
@@ -492,21 +543,13 @@ async def _handle_product_detail(request: web.Request) -> web.Response:
         cpc_eff = await processor.get_cpc_efficiency(sku)
         trends = await aggregator.get_trends(sku, days=trend_days)
 
-        latest_marketing = await ads_db.get_latest_by_sku(
-            sku, source=_SRC_MARKETING, report_period=report_period,
-        )
-        latest_external = await ads_db.get_latest_by_sku(
-            sku, source=_SRC_EXTERNAL, report_period=report_period,
-        )
-        latest_bonus_seller = await ads_db.get_latest_by_sku(
-            sku, source=_SRC_BONUS_SELLER, report_period=report_period,
-        )
-        latest_bonus_review = await ads_db.get_latest_by_sku(
-            sku, source=_SRC_BONUS_REVIEW, report_period=report_period,
-        )
-        latest_bonus_legacy = await ads_db.get_latest_by_sku(
-            sku, source=_SRC_BONUS_LEGACY, report_period=report_period,
-        )
+        latest_marketing = await _latest_with_fallback(_SRC_MARKETING, with_period=True)
+        latest_external = await _latest_with_fallback(_SRC_EXTERNAL, with_period=True)
+        # Для бонусов фильтр по report_period не применяем — бонус это
+        # моментальный статус, не зависит от 7/30-дневного окна.
+        latest_bonus_seller = await _latest_with_fallback(_SRC_BONUS_SELLER, with_period=False)
+        latest_bonus_review = await _latest_with_fallback(_SRC_BONUS_REVIEW, with_period=False)
+        latest_bonus_legacy = await _latest_with_fallback(_SRC_BONUS_LEGACY, with_period=False)
 
         # Назад-совместимость: latest_data — последняя marketing-запись,
         # с подмешиванием бонусной информации (старая контрактная форма).
