@@ -9,7 +9,14 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.utils.markdown import hcode
 
 from config import Config, now_kz
-from database import ProductsDB, ProductSellersDB, ScanLogsDB, SellersDB, RecentSellersDB
+from database import (
+    ProductsDB,
+    ProductSellersDB,
+    ScanLogsDB,
+    SellersDB,
+    RecentSellersDB,
+    SellerWorkflowDB,
+)
 from parser import KaspiParser
 from parser.title_utils import clean_product_title
 from .utils import validate_kaspi_url, paginate_list
@@ -1420,7 +1427,13 @@ async def sellers_page_navigation(callback: CallbackQuery):
         await callback.answer("Ошибка", show_alert=True)
 
 
-def _build_seller_details(seller_data: dict, page: int = 1, per_page: int = 10):
+def _build_seller_details(
+    seller_data: dict,
+    page: int = 1,
+    per_page: int = 10,
+    tracking: dict | None = None,
+    show_whatsapp_action: bool = False,
+):
     """Формирует текст и клавиатуру карточки продавца с пагинацией товаров."""
     merchant_id = seller_data['merchant_id']
     merchant_name = seller_data['merchant_name']
@@ -1437,6 +1450,35 @@ def _build_seller_details(seller_data: dict, page: int = 1, per_page: int = 10):
     text += f"<b>Товаров:</b> {total}\n"
     if total_pages > 1:
         text += f"<b>Страница:</b> {page}/{total_pages}\n"
+
+    if tracking and tracking.get("manual_products_sent_at"):
+        sent_at = tracking["manual_products_sent_at"]
+        try:
+            from datetime import datetime as _dt
+            sent_at = _dt.fromisoformat(sent_at).strftime("%d.%m.%Y %H:%M")
+        except (ValueError, TypeError):
+            pass
+
+        initial = tracking.get("manual_products_initial_count")
+        if initial is not None:
+            initial = int(initial)
+            detached = max(initial - total, 0)
+            if total == 0:
+                progress_status = "полностью открепился"
+            elif detached > 0:
+                progress_status = "частично открепился"
+            elif total > initial:
+                progress_status = "товаров стало больше"
+            else:
+                progress_status = "без изменений"
+
+            text += "\n<b>Отслеживание после WhatsApp:</b>\n"
+            text += f"Отправлено: {sent_at}\n"
+            text += f"Было товаров: {initial}\n"
+            text += f"Осталось: {total}\n"
+            text += f"Откреплено: {detached}\n"
+            text += f"Статус: {progress_status}\n"
+
     text += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
 
     if not products:
@@ -1480,6 +1522,14 @@ def _build_seller_details(seller_data: dict, page: int = 1, per_page: int = 10):
 
     # Кнопки навигации по товарам продавца
     keyboard = []
+    if show_whatsapp_action and products and seller_data.get("phone"):
+        keyboard.append([
+            InlineKeyboardButton(
+                text="Отправить товары в WhatsApp",
+                callback_data=f"wa_products_send_{merchant_id}",
+            )
+        ])
+
     if total_pages > 1:
         nav_buttons = []
         if page > 1:
@@ -1515,6 +1565,25 @@ def _build_seller_details(seller_data: dict, page: int = 1, per_page: int = 10):
     return text, reply_markup
 
 
+async def _get_seller_tracking(merchant_id: str) -> dict | None:
+    """Получить актуальный снимок ручной WhatsApp-отправки."""
+    workflow_db = SellerWorkflowDB(Config.DB_PATH)
+    workflow = await workflow_db.get_latest_workflow_for_seller(merchant_id)
+    if not workflow or workflow.get("status") in ("CLOSED", "DETACHED"):
+        return None
+    return workflow
+
+
+def _get_workflow_engine():
+    """Получить глобальный WorkflowEngine, созданный в main.py."""
+    import sys
+
+    main_module = sys.modules.get("__main__")
+    if main_module is None:
+        return None
+    return getattr(main_module, "workflow_engine", None)
+
+
 @router.callback_query(F.data.startswith("sellerpg_"))
 async def seller_details_page_navigation(callback: CallbackQuery):
     """Навигация по страницам товаров продавца"""
@@ -1530,7 +1599,13 @@ async def seller_details_page_navigation(callback: CallbackQuery):
             await callback.answer("Продавец не найден", show_alert=True)
             return
 
-        text, reply_markup = _build_seller_details(seller_data, page)
+        tracking = await _get_seller_tracking(merchant_id)
+        text, reply_markup = _build_seller_details(
+            seller_data,
+            page,
+            tracking=tracking,
+            show_whatsapp_action=is_admin(callback.from_user.id),
+        )
         await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
         await callback.answer()
 
@@ -1558,13 +1633,65 @@ async def show_seller_details(callback: CallbackQuery):
             await callback.answer("Продавец не найден", show_alert=True)
             return
 
-        text, reply_markup = _build_seller_details(seller_data, page=1)
+        tracking = await _get_seller_tracking(merchant_id)
+        text, reply_markup = _build_seller_details(
+            seller_data,
+            page=1,
+            tracking=tracking,
+            show_whatsapp_action=is_admin(callback.from_user.id),
+        )
         await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
         await callback.answer()
 
     except Exception as e:
         logger.error(f"Ошибка в show_seller_details: {e}", exc_info=True)
         await callback.answer("Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("wa_products_send_"))
+async def send_seller_products_whatsapp(callback: CallbackQuery):
+    """Отправить продавцу актуальный список товаров через WhatsApp."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступно только администраторам", show_alert=True)
+        return
+
+    merchant_id = callback.data.removeprefix("wa_products_send_")
+    engine = _get_workflow_engine()
+    if engine is None:
+        await callback.answer("WhatsApp-сервис не инициализирован", show_alert=True)
+        return
+
+    await callback.answer("Отправляю в WhatsApp...")
+    result = await engine.send_products_to_seller(merchant_id)
+    if not result.success:
+        error_messages = {
+            "seller_not_found": "Продавец не найден",
+            "phone_missing": "У продавца нет телефона",
+            "no_active_products": "У продавца нет активных товаров",
+            "rate_limited": "Достигнут лимит сообщений этому продавцу",
+            "whatsapp_error": "WhatsApp временно недоступен",
+            "send_failed": "Не удалось отправить первое предупреждение",
+        }
+        await callback.message.answer(
+            error_messages.get(result.reason, "Не удалось отправить сообщение")
+        )
+        return
+
+    seller_data = await SellersDB(Config.DB_PATH).get_seller_with_products(
+        merchant_id
+    )
+    tracking = await _get_seller_tracking(merchant_id)
+    text, reply_markup = _build_seller_details(
+        seller_data,
+        page=1,
+        tracking=tracking,
+        show_whatsapp_action=True,
+    )
+    await callback.message.edit_text(
+        "<b>Сообщение отправлено в WhatsApp</b>\n\n" + text,
+        reply_markup=reply_markup,
+        parse_mode="HTML",
+    )
 
 
 # ============================================================================

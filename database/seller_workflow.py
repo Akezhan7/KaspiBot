@@ -97,6 +97,58 @@ class SellerWorkflowDB:
             )
             raise
 
+    async def get_latest_workflow_for_seller(
+        self, seller_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Получить последнюю воронку продавца независимо от статуса."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                await db.execute("PRAGMA foreign_keys = ON")
+                async with db.execute(
+                    """
+                    SELECT * FROM seller_workflows
+                    WHERE seller_id = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (seller_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    return dict(row) if row else None
+        except Exception as e:
+            logger.error(
+                f"Ошибка получения последнего workflow для {seller_id}: {e}"
+            )
+            raise
+
+    async def record_manual_products_sent(
+        self, workflow_id: int, product_count: int
+    ) -> bool:
+        """Сохранить снимок успешной ручной отправки списка товаров."""
+        if product_count < 0:
+            raise ValueError("Количество товаров не может быть отрицательным")
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("PRAGMA foreign_keys = ON")
+                cursor = await db.execute(
+                    """
+                    UPDATE seller_workflows
+                    SET manual_products_sent_at = ?,
+                        manual_products_initial_count = ?
+                    WHERE id = ?
+                    """,
+                    (now_kz_str(), product_count, workflow_id),
+                )
+                await db.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(
+                f"Ошибка сохранения ручной отправки workflow {workflow_id}: {e}"
+            )
+            raise
+
     async def update_status(self, workflow_id: int, new_status: str) -> bool:
         """
         Обновить статус workflow.
@@ -284,7 +336,7 @@ class SellerWorkflowDB:
                 await db.execute("PRAGMA foreign_keys = ON")
                 async with db.execute(
                     """
-                    SELECT wp.*, p.title, p.url, ps.first_seen
+                    SELECT wp.*, p.title, p.url, ps.first_seen, ps.is_active
                     FROM workflow_products wp
                     JOIN products p ON wp.product_id = p.master_sku
                     JOIN seller_workflows sw ON wp.workflow_id = sw.id

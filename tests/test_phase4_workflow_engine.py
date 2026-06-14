@@ -151,6 +151,187 @@ async def test_on_new_seller_adds_to_existing(db_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_manual_products_send_uses_warn1_and_records_snapshot(db_path):
+    """Первое ручное сообщение использует WARN1 и фиксирует прогресс."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(db_path, "SKU001", title="Активный товар")
+    await _seed_product(db_path, "SKU002", title="Снятый товар")
+    await _seed_product_seller(db_path, "SKU001")
+    await _seed_product_seller(db_path, "SKU002")
+
+    ps_db = ProductSellersDB(db_path)
+    await ps_db.deactivate_missing_sellers("SKU002", [])
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(return_value={"idMessage": "manual_warn1"})
+    notifier = AsyncMock()
+    notifier.send_to_admins = AsyncMock()
+    notifier.notify_warn1_sent = AsyncMock()
+
+    engine = _make_engine(db_path, wa_client=wa_client, notifier=notifier)
+
+    result = await engine.send_products_to_seller("M001")
+
+    assert result.success is True
+    assert result.sent_warn1 is True
+    assert result.product_count == 1
+    assert result.workflow_id is not None
+
+    sent_text = wa_client.send_text.call_args.args[1]
+    assert "Активный товар" in sent_text
+    assert "Снятый товар" not in sent_text
+
+    workflow = await SellerWorkflowDB(db_path).get_workflow(result.workflow_id)
+    assert workflow["status"] == "WARN1_SENT"
+    assert workflow["manual_products_initial_count"] == 1
+    assert workflow["manual_products_sent_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_products_send_after_warn1_keeps_status(db_path):
+    """После WARN1 уходит короткий список без смены этапа воронки."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(
+        db_path,
+        "SKU001",
+        url="https://kaspi.kz/shop/p/manual-product",
+        title="Товар после звонка",
+    )
+    await _seed_product_seller(db_path, "SKU001")
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(return_value={"idMessage": "message"})
+    notifier = AsyncMock()
+    notifier.send_to_admins = AsyncMock()
+    notifier.notify_warn1_sent = AsyncMock()
+
+    engine = _make_engine(db_path, wa_client=wa_client, notifier=notifier)
+    wf_id = await engine.on_new_seller_detected("M001", ["SKU001"])
+    await engine.send_warn1(wf_id)
+    wa_client.send_text.reset_mock()
+
+    result = await engine.send_products_to_seller("M001")
+
+    assert result.success is True
+    assert result.sent_warn1 is False
+    assert result.workflow_id == wf_id
+
+    workflow = await SellerWorkflowDB(db_path).get_workflow(wf_id)
+    assert workflow["status"] == "WARN1_SENT"
+
+    sent_text = wa_client.send_text.call_args.args[1]
+    assert "По итогам разговора" in sent_text
+    assert "Товар после звонка" in sent_text
+    assert "https://kaspi.kz/shop/p/manual-product" in sent_text
+
+    messages = await MessageLogDB(db_path).get_messages_for_workflow(wf_id)
+    assert messages[-1]["template_code"] == "MANUAL_PRODUCT_LIST"
+
+
+@pytest.mark.asyncio
+async def test_manual_products_concurrent_clicks_send_once(db_path):
+    """Два быстрых ручных нажатия не дублируют сообщение."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(db_path)
+    await _seed_product_seller(db_path)
+
+    wf_db = SellerWorkflowDB(db_path)
+    wf_id = await wf_db.create_workflow("M001")
+    await wf_db.add_product_to_workflow(wf_id, "SKU001")
+    await wf_db.update_status(wf_id, "WARN1_SENT")
+
+    first_send_started = asyncio.Event()
+    release_send = asyncio.Event()
+    send_count = 0
+
+    async def slow_send(*_args):
+        nonlocal send_count
+        send_count += 1
+        first_send_started.set()
+        await release_send.wait()
+        return {"idMessage": f"manual{send_count}"}
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(side_effect=slow_send)
+    engine = _make_engine(db_path, wa_client=wa_client)
+
+    first = asyncio.create_task(engine.send_products_to_seller("M001"))
+    await first_send_started.wait()
+    second = asyncio.create_task(engine.send_products_to_seller("M001"))
+    await asyncio.sleep(0.05)
+    release_send.set()
+
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert send_count == 1
+    assert first_result.success is True
+    assert second_result.success is False
+    assert second_result.reason == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_manual_products_send_failure_does_not_record_snapshot(db_path):
+    """Ошибка WhatsApp не должна отмечать ручную отправку успешной."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(db_path)
+    await _seed_product_seller(db_path)
+
+    wf_db = SellerWorkflowDB(db_path)
+    wf_id = await wf_db.create_workflow("M001")
+    await wf_db.add_product_to_workflow(wf_id, "SKU001")
+    await wf_db.update_status(wf_id, "WARN1_SENT")
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(side_effect=RuntimeError("WhatsApp unavailable"))
+    notifier = AsyncMock()
+    notifier.send_to_admins = AsyncMock()
+
+    engine = _make_engine(db_path, wa_client=wa_client, notifier=notifier)
+
+    result = await engine.send_products_to_seller("M001")
+
+    assert result.success is False
+    assert result.reason == "whatsapp_error"
+
+    workflow = await wf_db.get_workflow(wf_id)
+    assert workflow["manual_products_sent_at"] is None
+    assert workflow["manual_products_initial_count"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phone", "with_active_product", "expected_reason"),
+    [
+        (None, True, "phone_missing"),
+        ("+77011234567", False, "no_active_products"),
+    ],
+)
+async def test_manual_products_send_validates_recipient(
+    db_path, phone, with_active_product, expected_reason
+):
+    """Без телефона или активных товаров ручная отправка не выполняется."""
+    await _init_db(db_path)
+    await _seed_seller(db_path, phone=phone)
+    await _seed_product(db_path)
+    if with_active_product:
+        await _seed_product_seller(db_path)
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(return_value={"idMessage": "unexpected"})
+    engine = _make_engine(db_path, wa_client=wa_client)
+
+    result = await engine.send_products_to_seller("M001")
+
+    assert result.success is False
+    assert result.reason == expected_reason
+    wa_client.send_text.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_send_warn1_success(db_path):
     """WARN1 отправляется, статус обновляется, лог записывается."""
     await _init_db(db_path)
@@ -184,6 +365,47 @@ async def test_send_warn1_success(db_path):
     assert len(messages) == 1
     assert messages[0]["direction"] == "OUT"
     assert messages[0]["wa_message_id"] == "msg001"
+
+
+@pytest.mark.asyncio
+async def test_send_warn1_concurrent_calls_send_only_once(db_path):
+    """Ручной запуск и планировщик не должны продублировать WARN1."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(db_path)
+    await _seed_product_seller(db_path)
+
+    first_send_started = asyncio.Event()
+    release_send = asyncio.Event()
+    send_count = 0
+
+    async def slow_send(*_args):
+        nonlocal send_count
+        send_count += 1
+        first_send_started.set()
+        await release_send.wait()
+        return {"idMessage": f"msg{send_count}"}
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(side_effect=slow_send)
+    notifier = AsyncMock()
+    notifier.send_to_admins = AsyncMock()
+    notifier.notify_warn1_sent = AsyncMock()
+
+    engine = _make_engine(db_path, wa_client=wa_client, notifier=notifier)
+    wf_id = await engine.on_new_seller_detected("M001", ["SKU001"])
+
+    first = asyncio.create_task(engine.send_warn1(wf_id))
+    await first_send_started.wait()
+    second = asyncio.create_task(engine.send_warn1(wf_id))
+    await asyncio.sleep(0.05)
+    release_send.set()
+
+    results = await asyncio.gather(first, second)
+
+    assert send_count == 1
+    assert results.count(True) == 1
+    assert results.count(False) == 1
 
 
 @pytest.mark.asyncio

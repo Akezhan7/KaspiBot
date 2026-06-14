@@ -210,6 +210,14 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             "CREATE INDEX IF NOT EXISTS idx_ads_data_period ON ads_data(period_days)",
         ],
     ),
+    (
+        7,
+        "seller_workflows: снимок ручной отправки списка товаров",
+        [
+            "ALTER TABLE seller_workflows ADD COLUMN manual_products_sent_at TIMESTAMP",
+            "ALTER TABLE seller_workflows ADD COLUMN manual_products_initial_count INTEGER",
+        ],
+    ),
 ]
 
 

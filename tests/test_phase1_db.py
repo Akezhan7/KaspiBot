@@ -50,7 +50,7 @@ async def test_migration_version(db_path):
     await _init_db(db_path)
     migrations = DatabaseMigrations(db_path)
     version = await migrations.get_current_version()
-    assert version == 4  # 4 миграции после добавления таблиц ads_data (фаза 11)
+    assert version == 7
 
 
 # === SellerWorkflowDB ===
@@ -104,6 +104,48 @@ async def test_workflow_active_for_seller(db_path):
     await wf_db.update_status(wf_id, "CLOSED")
     active = await wf_db.get_active_workflow_for_seller("M002")
     assert active is None
+
+
+@pytest.mark.asyncio
+async def test_workflow_latest_for_seller(db_path):
+    """Последняя воронка возвращается независимо от её статуса."""
+    await _init_db(db_path)
+
+    sellers = SellersDB(db_path)
+    await sellers.add_seller("M002L", "Shop latest")
+
+    wf_db = SellerWorkflowDB(db_path)
+    first_id = await wf_db.create_workflow("M002L")
+    await wf_db.update_status(first_id, "CLOSED")
+    latest_id = await wf_db.create_workflow("M002L")
+    await wf_db.update_status(latest_id, "READY_FOR_LAWSUIT")
+
+    latest = await wf_db.get_latest_workflow_for_seller("M002L")
+
+    assert latest is not None
+    assert latest["id"] == latest_id
+    assert latest["status"] == "READY_FOR_LAWSUIT"
+
+
+@pytest.mark.asyncio
+async def test_record_manual_products_snapshot(db_path):
+    """Ручная отправка сохраняет время и исходное число товаров."""
+    await _init_db(db_path)
+
+    sellers = SellersDB(db_path)
+    await sellers.add_seller("M002S", "Shop snapshot")
+
+    wf_db = SellerWorkflowDB(db_path)
+    wf_id = await wf_db.create_workflow("M002S")
+    before = await wf_db.get_workflow(wf_id)
+
+    updated = await wf_db.record_manual_products_sent(wf_id, 12)
+    workflow = await wf_db.get_workflow(wf_id)
+
+    assert updated is True
+    assert workflow["manual_products_initial_count"] == 12
+    assert workflow["manual_products_sent_at"] is not None
+    assert workflow["updated_at"] == before["updated_at"]
 
 
 @pytest.mark.asyncio

@@ -75,6 +75,8 @@ class DatabaseSchema:
         warn2_sent_at TIMESTAMP,
         detached_at TIMESTAMP,
         closed_at TIMESTAMP,
+        manual_products_sent_at TIMESTAMP,
+        manual_products_initial_count INTEGER,
         notes TEXT
     );
 
