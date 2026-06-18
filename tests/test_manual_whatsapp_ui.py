@@ -2,7 +2,7 @@
 
 import pytest
 
-from bot.handlers import _build_seller_details
+from bot.handlers import _build_seller_details, _format_seller_button_text, _format_seller_list_line
 
 
 def _seller_data(product_count: int) -> dict:
@@ -82,3 +82,27 @@ def test_seller_card_hides_whatsapp_action_for_non_admin():
         for row in markup.inline_keyboard
         for button in row
     )
+
+
+def test_seller_list_marks_manual_whatsapp_sellers():
+    seller = {
+        "merchant_id": "M001",
+        "merchant_name": "Manual Shop",
+        "product_count": 12,
+        "manual_products_sent_at": "2026-06-14 15:30:00",
+    }
+
+    assert _format_seller_button_text(seller) == "🔴 Manual Shop (12)"
+    assert _format_seller_list_line(1, seller) == "1. 🔴 <b>Manual Shop</b> (12)\n"
+
+
+def test_seller_list_does_not_mark_regular_sellers():
+    seller = {
+        "merchant_id": "M002",
+        "merchant_name": "Regular Shop",
+        "product_count": 5,
+        "manual_products_sent_at": None,
+    }
+
+    assert _format_seller_button_text(seller) == "Regular Shop (5)"
+    assert _format_seller_list_line(2, seller) == "2. <b>Regular Shop</b> (5)\n"

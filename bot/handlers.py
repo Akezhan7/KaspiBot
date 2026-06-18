@@ -2,9 +2,12 @@
 Telegram bot handlers
 Обработка команд пользователя
 """
+import html
 import logging
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.utils.markdown import hcode
 
@@ -26,12 +29,31 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+class SellerSearchFSM(StatesGroup):
+    waiting_query = State()
+
+
+MENU_BUTTONS = [
+    "Мои товары",
+    "Все продавцы",
+    "Новые продавцы",
+    "Поиск",
+    "Поиск продавца",
+    "Статистика",
+    "Добавить товар",
+    "Сканировать",
+]
+
+MANUAL_WHATSAPP_MARKER = "🔴"
+
+
 # Постоянная клавиатура для пользователей
 def get_main_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     """Получить главную клавиатуру с кнопками"""
     buttons = [
         [KeyboardButton(text="Мои товары"), KeyboardButton(text="Все продавцы")],
         [KeyboardButton(text="Новые продавцы"), KeyboardButton(text="Поиск")],
+        [KeyboardButton(text="Поиск продавца")],
         [KeyboardButton(text="Статистика")]
     ]
     
@@ -71,6 +93,7 @@ async def cmd_start(message: Message):
         "/add <code>&lt;url&gt;</code> — добавить товар\n"
         "/list — список товаров\n"
         "/search <code>&lt;запрос&gt;</code> — поиск товаров\n"
+        "/seller_search <code>&lt;запрос&gt;</code> — поиск продавцов\n"
         "/sellers — все продавцы\n"
         "/recent — последние новые продавцы\n"
         "/remove <code>&lt;sku&gt;</code> — удалить товар\n"
@@ -1275,6 +1298,79 @@ async def button_all_sellers(message: Message):
         await message.answer("Ошибка получения списка продавцов")
 
 
+def _seller_was_sent_manual_whatsapp(seller: dict) -> bool:
+    return bool(seller.get("manual_products_sent_at"))
+
+
+def _format_seller_button_text(seller: dict) -> str:
+    merchant_name = seller["merchant_name"]
+    product_count = seller.get("product_count", 0)
+    display_name = merchant_name[:35] + "..." if len(merchant_name) > 35 else merchant_name
+    marker = f"{MANUAL_WHATSAPP_MARKER} " if _seller_was_sent_manual_whatsapp(seller) else ""
+    return f"{marker}{display_name} ({product_count})"
+
+
+def _format_seller_list_line(idx: int, seller: dict) -> str:
+    merchant_name = html.escape(seller["merchant_name"])
+    product_count = seller.get("product_count", 0)
+    marker = f"{MANUAL_WHATSAPP_MARKER} " if _seller_was_sent_manual_whatsapp(seller) else ""
+    return f"{idx}. {marker}<b>{merchant_name}</b> ({product_count})\n"
+
+
+def _build_sellers_list_view(
+    sellers: list[dict],
+    page: int,
+    per_page: int = 20,
+) -> tuple[str, InlineKeyboardMarkup, int]:
+    total = len(sellers)
+    total_pages = (total + per_page - 1) // per_page
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    sellers_page = sellers[start_idx:end_idx]
+
+    text = "<b>Все продавцы</b>\n\n"
+    text += f"Всего: {total} | Страница {page}/{total_pages}\n"
+    text += f"{MANUAL_WHATSAPP_MARKER} — товары вручную отправлялись в WhatsApp\n\n"
+    text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    keyboard = []
+
+    for idx, seller in enumerate(sellers_page, start_idx + 1):
+        merchant_id = seller["merchant_id"]
+        text += _format_seller_list_line(idx, seller)
+
+        keyboard.append([
+            InlineKeyboardButton(
+                text=_format_seller_button_text(seller),
+                callback_data=f"seller_{merchant_id}"
+            )
+        ])
+
+    nav_buttons = []
+    if page > 1:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="Назад",
+                callback_data=f"sellers_page_{page - 1}"
+            )
+        )
+
+    if page < total_pages:
+        nav_buttons.append(
+            InlineKeyboardButton(
+                text="Вперед",
+                callback_data=f"sellers_page_{page + 1}"
+            )
+        )
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    return text, InlineKeyboardMarkup(inline_keyboard=keyboard), page
+
+
 async def show_sellers_list(message: Message, page: int = 1):
     """Показать список всех продавцов с количеством товаров и пагинацией"""
     per_page = 20
@@ -1289,63 +1385,8 @@ async def show_sellers_list(message: Message, page: int = 1):
             parse_mode="HTML"
         )
         return
-    
-    total = len(sellers)
-    total_pages = (total + per_page - 1) // per_page
-    
-    # Пагинация
-    start_idx = (page - 1) * per_page
-    end_idx = start_idx + per_page
-    sellers_page = sellers[start_idx:end_idx]
-    
-    # Формируем сообщение
-    text = f"<b>Все продавцы</b>\n\n"
-    text += f"Всего: {total} | Страница {page}/{total_pages}\n\n"
-    text += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    
-    # Создаем кнопки для каждого продавца
-    keyboard = []
-    
-    for idx, seller in enumerate(sellers_page, start_idx + 1):
-        merchant_name = seller['merchant_name']
-        product_count = seller['product_count']
-        merchant_id = seller['merchant_id']
-        
-        # Сокращаем название если длинное
-        display_name = merchant_name[:35] + '...' if len(merchant_name) > 35 else merchant_name
-        
-        text += f"{idx}. <b>{merchant_name}</b> ({product_count})\n"
-        
-        # Кнопка для открытия продавца
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"{display_name} ({product_count})",
-                callback_data=f"seller_{merchant_id}"
-            )
-        ])
-    
-    # Кнопки навигации
-    nav_buttons = []
-    if page > 1:
-        nav_buttons.append(
-            InlineKeyboardButton(
-                text="Назад",
-                callback_data=f"sellers_page_{page-1}"
-            )
-        )
-    
-    if page < total_pages:
-        nav_buttons.append(
-            InlineKeyboardButton(
-                text="Вперед",
-                callback_data=f"sellers_page_{page+1}"
-            )
-        )
-    
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-    
-    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+    text, reply_markup, _ = _build_sellers_list_view(sellers, page, per_page)
     
     await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
 
@@ -1363,61 +1404,8 @@ async def sellers_page_navigation(callback: CallbackQuery):
         if not sellers:
             await callback.message.edit_text("Список продавцов пуст")
             return
-        
-        total = len(sellers)
-        total_pages = (total + per_page - 1) // per_page
-        
-        # Пагинация
-        start_idx = (page - 1) * per_page
-        end_idx = start_idx + per_page
-        sellers_page = sellers[start_idx:end_idx]
-        
-        # Формируем сообщение
-        text = f"<b>Все продавцы</b>\n\n"
-        text += f"Всего: {total} | Страница {page}/{total_pages}\n\n"
-        text += "━━━━━━━━━━━━━━━━━━━━\n\n"
-        
-        # Создаем кнопки
-        keyboard = []
-        
-        for idx, seller in enumerate(sellers_page, start_idx + 1):
-            merchant_name = seller['merchant_name']
-            product_count = seller['product_count']
-            merchant_id = seller['merchant_id']
-            
-            display_name = merchant_name[:35] + '...' if len(merchant_name) > 35 else merchant_name
-            
-            text += f"{idx}. <b>{merchant_name}</b> ({product_count})\n"
-            
-            keyboard.append([
-                InlineKeyboardButton(
-                    text=f"{display_name} ({product_count})",
-                    callback_data=f"seller_{merchant_id}"
-                )
-            ])
-        
-        # Навигация
-        nav_buttons = []
-        if page > 1:
-            nav_buttons.append(
-                InlineKeyboardButton(
-                    text="Назад",
-                    callback_data=f"sellers_page_{page-1}"
-                )
-            )
-        
-        if page < total_pages:
-            nav_buttons.append(
-                InlineKeyboardButton(
-                    text="Вперед",
-                    callback_data=f"sellers_page_{page+1}"
-                )
-            )
-        
-        if nav_buttons:
-            keyboard.append(nav_buttons)
-        
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+        text, reply_markup, _ = _build_sellers_list_view(sellers, page, per_page)
         
         await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="HTML")
         await callback.answer()
@@ -1695,6 +1683,107 @@ async def send_seller_products_whatsapp(callback: CallbackQuery):
 
 
 # ============================================================================
+# ПОИСК ПРОДАВЦОВ
+# ============================================================================
+
+@router.message(F.text == "Поиск продавца")
+async def button_seller_search(message: Message, state: FSMContext):
+    """Кнопка 'Поиск продавца' - ждать запрос продавца."""
+    await state.set_state(SellerSearchFSM.waiting_query)
+    await message.answer(
+        "<b>Поиск продавца</b>\n\n"
+        "Введите название магазина, телефон или ID продавца.\n\n"
+        "<b>Примеры:</b>\n"
+        "• Alpha Market\n"
+        "• 87011234567\n"
+        "• M777\n\n"
+        "Или используйте команду:\n"
+        "/seller_search <code>&lt;запрос&gt;</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("seller_search"))
+async def cmd_seller_search(message: Message, state: FSMContext):
+    """Команда /seller_search <запрос> - поиск продавцов."""
+    args = message.text.split(maxsplit=1)
+
+    if len(args) < 2:
+        await button_seller_search(message, state)
+        return
+
+    query = args[1].strip()
+    if len(query) < 2:
+        await message.answer("Запрос слишком короткий. Минимум 2 символа.")
+        return
+
+    try:
+        await perform_seller_search(message, query)
+    except Exception as e:
+        logger.error(f"Ошибка в cmd_seller_search: {e}", exc_info=True)
+        await message.answer("Ошибка при поиске продавцов")
+
+
+@router.message(SellerSearchFSM.waiting_query, F.text)
+async def process_seller_search_query(message: Message, state: FSMContext):
+    """Обработать следующий текст после кнопки поиска продавца."""
+    query = message.text.strip()
+
+    if query in MENU_BUTTONS:
+        await state.clear()
+        return
+
+    if len(query) < 2:
+        await message.answer(
+            "Запрос слишком короткий. Минимум 2 символа.\n\n"
+            "Введите название магазина, телефон или ID продавца."
+        )
+        return
+
+    await state.clear()
+
+    try:
+        await perform_seller_search(message, query)
+    except Exception as e:
+        logger.error(f"Ошибка при поиске продавцов: {e}", exc_info=True)
+        await message.answer("Ошибка при поиске продавцов")
+
+
+async def perform_seller_search(message: Message, query: str):
+    """Выполнить поиск продавцов и показать результаты."""
+    sellers_db = SellersDB(Config.DB_PATH)
+    results = await sellers_db.search_sellers(query)
+
+    if not results:
+        await message.answer(
+            f"<b>Поиск продавца: \"{html.escape(query)}\"</b>\n\n"
+            "Ничего не найдено.\n\n"
+            "Попробуйте название магазина, телефон или ID продавца.",
+            parse_mode="HTML",
+        )
+        return
+
+    text = f"<b>Результаты поиска продавцов: \"{html.escape(query)}\"</b>\n\n"
+    text += f"Найдено: {len(results)}\n"
+    text += f"{MANUAL_WHATSAPP_MARKER} — товары вручную отправлялись в WhatsApp\n\n"
+
+    keyboard = []
+    for idx, seller in enumerate(results, 1):
+        text += _format_seller_list_line(idx, seller)
+        keyboard.append([
+            InlineKeyboardButton(
+                text=_format_seller_button_text(seller),
+                callback_data=f"seller_{seller['merchant_id']}",
+            )
+        ])
+
+    text += "\n<i>Нажмите на продавца, чтобы открыть карточку</i>"
+
+    reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await message.answer(text, reply_markup=reply_markup, parse_mode="HTML")
+
+
+# ============================================================================
 # ПОИСК ТОВАРОВ
 # ============================================================================
 
@@ -1829,9 +1918,7 @@ async def handle_text_search(message: Message):
         return
     
     # Игнорируем кнопки меню (они уже обработаны выше)
-    menu_buttons = ["Мои товары", "Все продавцы", "Новые продавцы", "Поиск", 
-                    "Статистика", "Добавить товар", "Сканировать"]
-    if message.text in menu_buttons:
+    if message.text in MENU_BUTTONS:
         return
     
     # Игнорируем URL Kaspi (они обработаны выше)

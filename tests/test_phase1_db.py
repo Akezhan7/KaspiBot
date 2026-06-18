@@ -11,6 +11,7 @@ from database.schema import DatabaseSchema
 from database.migrations import DatabaseMigrations
 from database.sellers import SellersDB
 from database.products import ProductsDB
+from database.product_sellers import ProductSellersDB
 from database.seller_workflow import SellerWorkflowDB
 from database.message_log import MessageLogDB
 from database.legal_requests import LegalRequestsDB
@@ -146,6 +147,64 @@ async def test_record_manual_products_snapshot(db_path):
     assert workflow["manual_products_initial_count"] == 12
     assert workflow["manual_products_sent_at"] is not None
     assert workflow["updated_at"] == before["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_sellers_list_includes_manual_products_marker_fields(db_path):
+    """Список продавцов возвращает факт ручной WhatsApp-отправки."""
+    await _init_db(db_path)
+
+    sellers = SellersDB(db_path)
+    products = ProductsDB(db_path)
+    links = ProductSellersDB(db_path)
+    workflows = SellerWorkflowDB(db_path)
+
+    await sellers.add_seller("M001", "Manual Shop", "+7 701 123 45 67")
+    await sellers.add_seller("M002", "Regular Shop", "+7 702 000 00 00")
+    await products.add_product("SKU001", "https://kaspi.kz/shop/p/sku001", "Товар 1")
+    await products.add_product("SKU002", "https://kaspi.kz/shop/p/sku002", "Товар 2")
+    await links.add_or_update_link("SKU001", "M001", 100)
+    await links.add_or_update_link("SKU002", "M002", 200)
+
+    wf_id = await workflows.create_workflow("M001")
+    await workflows.record_manual_products_sent(wf_id, 1)
+
+    result = await sellers.get_all_sellers_with_product_count()
+    by_id = {seller["merchant_id"]: seller for seller in result}
+
+    assert by_id["M001"]["manual_products_sent_at"] is not None
+    assert by_id["M001"]["manual_products_initial_count"] == 1
+    assert by_id["M002"]["manual_products_sent_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_search_sellers_by_name_id_and_phone_with_manual_fields(db_path):
+    """Поиск продавцов ищет по названию, ID, телефону и возвращает ручную метку."""
+    await _init_db(db_path)
+
+    sellers = SellersDB(db_path)
+    products = ProductsDB(db_path)
+    links = ProductSellersDB(db_path)
+    workflows = SellerWorkflowDB(db_path)
+
+    await sellers.add_seller("M777", "Alpha Market", "+7 (701) 123-45-67")
+    await sellers.add_seller("M888", "Beta Shop", "+7 702 000 00 00")
+    await products.add_product("SKU001", "https://kaspi.kz/shop/p/sku001", "Товар 1")
+    await products.add_product("SKU002", "https://kaspi.kz/shop/p/sku002", "Товар 2")
+    await links.add_or_update_link("SKU001", "M777", 100)
+    await links.add_or_update_link("SKU002", "M888", 200)
+
+    wf_id = await workflows.create_workflow("M777")
+    await workflows.record_manual_products_sent(wf_id, 1)
+
+    by_name = await sellers.search_sellers("alpha")
+    by_id = await sellers.search_sellers("M777")
+    by_phone = await sellers.search_sellers("87011234567")
+
+    assert [seller["merchant_id"] for seller in by_name] == ["M777"]
+    assert [seller["merchant_id"] for seller in by_id] == ["M777"]
+    assert [seller["merchant_id"] for seller in by_phone] == ["M777"]
+    assert by_phone[0]["manual_products_sent_at"] is not None
 
 
 @pytest.mark.asyncio

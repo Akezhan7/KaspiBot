@@ -108,7 +108,11 @@ class SellersDB:
         Получить всех продавцов с количеством активных товаров
         
         Returns:
-            List[{"merchant_id", "merchant_name", "phone", "created_at", "product_count"}]
+            List[{
+                "merchant_id", "merchant_name", "phone", "created_at",
+                "product_count", "manual_products_sent_at",
+                "manual_products_initial_count"
+            }]
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
@@ -117,10 +121,20 @@ class SellersDB:
                 query = """
                     SELECT 
                         s.*,
-                        COUNT(ps.product_id) as product_count
+                        COUNT(ps.product_id) as product_count,
+                        sw.manual_products_sent_at,
+                        sw.manual_products_initial_count
                     FROM sellers s
                     LEFT JOIN product_sellers ps ON s.merchant_id = ps.seller_id 
                         AND ps.is_active = 1
+                    LEFT JOIN seller_workflows sw ON sw.id = (
+                        SELECT sw2.id
+                        FROM seller_workflows sw2
+                        WHERE sw2.seller_id = s.merchant_id
+                          AND sw2.status NOT IN ('CLOSED', 'DETACHED')
+                        ORDER BY sw2.id DESC
+                        LIMIT 1
+                    )
                     GROUP BY s.merchant_id
                     HAVING product_count > 0
                     ORDER BY product_count DESC, s.merchant_name ASC
@@ -131,6 +145,112 @@ class SellersDB:
                     return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"Ошибка получения продавцов с подсчетом: {e}")
+            raise
+
+    async def search_sellers(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Найти активных продавцов по названию, merchant_id или телефону.
+
+        Возвращает те же поля, что и get_all_sellers_with_product_count().
+        """
+        query = query.strip()
+        if len(query) < 2:
+            return []
+
+        query_lower = query.lower()
+        text_like = f"%{query_lower}%"
+        prefix_like = f"{query_lower}%"
+
+        phone_digits = "".join(ch for ch in query if ch.isdigit())
+        alt_phone_digits = phone_digits
+        if len(phone_digits) == 11 and phone_digits.startswith("8"):
+            alt_phone_digits = "7" + phone_digits[1:]
+        elif len(phone_digits) == 11 and phone_digits.startswith("7"):
+            alt_phone_digits = "8" + phone_digits[1:]
+
+        phone_like = f"%{phone_digits}%" if phone_digits else "__no_phone_match__"
+        alt_phone_like = (
+            f"%{alt_phone_digits}%"
+            if alt_phone_digits and alt_phone_digits != phone_digits
+            else "__no_phone_match__"
+        )
+
+        phone_expr = """
+            REPLACE(
+                REPLACE(
+                    REPLACE(
+                        REPLACE(
+                            REPLACE(COALESCE(s.phone, ''), '+', ''),
+                            ' ', ''
+                        ),
+                        '-', ''
+                    ),
+                    '(', ''
+                ),
+                ')', ''
+            )
+        """
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+
+                query_sql = f"""
+                    WITH active_counts AS (
+                        SELECT seller_id, COUNT(*) AS product_count
+                        FROM product_sellers
+                        WHERE is_active = 1
+                        GROUP BY seller_id
+                    )
+                    SELECT
+                        s.*,
+                        ac.product_count,
+                        sw.manual_products_sent_at,
+                        sw.manual_products_initial_count
+                    FROM sellers s
+                    JOIN active_counts ac ON ac.seller_id = s.merchant_id
+                    LEFT JOIN seller_workflows sw ON sw.id = (
+                        SELECT sw2.id
+                        FROM seller_workflows sw2
+                        WHERE sw2.seller_id = s.merchant_id
+                          AND sw2.status NOT IN ('CLOSED', 'DETACHED')
+                        ORDER BY sw2.id DESC
+                        LIMIT 1
+                    )
+                    WHERE LOWER(s.merchant_name) LIKE ?
+                       OR LOWER(s.merchant_id) LIKE ?
+                       OR {phone_expr} LIKE ?
+                       OR {phone_expr} LIKE ?
+                    ORDER BY
+                        CASE
+                            WHEN LOWER(s.merchant_name) = ? THEN 0
+                            WHEN LOWER(s.merchant_id) = ? THEN 0
+                            WHEN LOWER(s.merchant_name) LIKE ? THEN 1
+                            WHEN LOWER(s.merchant_id) LIKE ? THEN 1
+                            ELSE 2
+                        END,
+                        ac.product_count DESC,
+                        s.merchant_name ASC
+                    LIMIT ?
+                """
+
+                params = (
+                    text_like,
+                    text_like,
+                    phone_like,
+                    alt_phone_like,
+                    query_lower,
+                    query_lower,
+                    prefix_like,
+                    prefix_like,
+                    limit,
+                )
+
+                async with db.execute(query_sql, params) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка поиска продавцов по запросу {query}: {e}")
             raise
     
     async def get_seller_with_products(self, merchant_id: str) -> Optional[Dict[str, Any]]:
