@@ -11,7 +11,9 @@ from datetime import date
 
 import pytest
 
-from scraper.marketing import _parse_number, _parse_int
+from database.schema import DatabaseSchema
+from database.products import ProductsDB
+from scraper.marketing import MarketingScraper, _parse_number, _parse_int
 from scraper.models import AdCampaignData, BonusData, ScrapeResult
 
 
@@ -265,3 +267,52 @@ def test_scrape_result_add_error_appends_message():
     assert len(result.errors) == 2
     assert "err1" in result.errors
     assert "err2" in result.errors
+
+
+# ===========================================================================
+# Блок 6: нормализация SKU отчётов
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_scraper_normalizes_report_row_sku_from_product_name_sku(tmp_path):
+    """Если отчёт дал surrogate SKU, но product_name = master_sku, берём реальный SKU."""
+    db_path = tmp_path / "sku_normalization.db"
+    await DatabaseSchema.init_db(db_path)
+    products_db = ProductsDB(str(db_path))
+    await products_db.add_product(
+        "162393025",
+        "https://kaspi.kz/shop/p/zvonok-162393025",
+        "Звонок с кнопкой белый",
+    )
+
+    scraper = MarketingScraper(browser_context=None, db_path=str(db_path))  # type: ignore[arg-type]
+    row = AdCampaignData(
+        product_sku="RPT-ABCDEF12",
+        product_name="162393025",
+        impressions=100,
+        clicks=10,
+        ctr=10.0,
+        spend=500.0,
+        cpc=50.0,
+    )
+
+    await scraper._normalize_report_product_skus([row])
+
+    assert row.product_sku == "162393025"
+
+
+@pytest.mark.asyncio
+async def test_scraper_normalization_diagnostics_counts_surrogate_rows(tmp_path):
+    db_path = tmp_path / "sku_diagnostics.db"
+    await DatabaseSchema.init_db(db_path)
+    scraper = MarketingScraper(browser_context=None, db_path=str(db_path))  # type: ignore[arg-type]
+    rows = [
+        AdCampaignData("162393025", "162393025", 100, 10, 10.0, 500.0, 50.0),
+        BonusData("RPT-ABCDEF12", "Неизвестный товар", True, 5.0),
+    ]
+
+    diagnostics = await scraper.get_report_identity_diagnostics(rows)
+
+    assert diagnostics["total"] == 2
+    assert diagnostics["real_sku_count"] == 1
+    assert diagnostics["surrogate_sku_count"] == 1

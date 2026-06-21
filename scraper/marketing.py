@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
 import zipfile
 
+import aiosqlite
 from playwright.async_api import BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 
 from config import Config, now_kz
@@ -184,9 +185,15 @@ class MarketingScraper:
                     "3) совпадают ли селекторы со структурой DOM."
                 )
             else:
+                await self._normalize_report_product_skus(all_products)
+                diagnostics = await self.get_report_identity_diagnostics(all_products)
                 logger.info(
-                    "MarketingScraper: всего собрано %d товаров (внутренняя+внешняя реклама)",
+                    "MarketingScraper: всего собрано %d товаров (внутренняя+внешняя реклама), "
+                    "real_sku=%d, surrogate=%d, matched_products=%d",
                     len(all_products),
+                    diagnostics["real_sku_count"],
+                    diagnostics["surrogate_sku_count"],
+                    diagnostics["product_match_count"],
                 )
             return all_products
 
@@ -282,6 +289,17 @@ class MarketingScraper:
                     logger.warning(
                         "MarketingScraper: пропуск URL бонусов без контента: %s", url,
                     )
+
+            await self._normalize_report_product_skus(collected)
+            diagnostics = await self.get_report_identity_diagnostics(collected)
+            logger.info(
+                "MarketingScraper: bonus identity diagnostics: total=%d, real_sku=%d, "
+                "surrogate=%d, matched_products=%d",
+                diagnostics["total"],
+                diagnostics["real_sku_count"],
+                diagnostics["surrogate_sku_count"],
+                diagnostics["product_match_count"],
+            )
 
             bonus_data = self._deduplicate_bonuses(collected)
             logger.info("MarketingScraper: собрано %d бонусных записей", len(bonus_data))
@@ -2054,6 +2072,112 @@ class MarketingScraper:
 
         logger.error("MarketingScraper: ни один URL %s не открылся с контентом", section_name)
         return None
+
+    @staticmethod
+    def _is_real_product_sku(value: str | None) -> bool:
+        """Похоже ли значение на реальный Kaspi product SKU."""
+        return bool(value and re.match(r"^\d{5,12}$", value.strip()))
+
+    @staticmethod
+    def _identity_key(value: str | None) -> str:
+        """Нормализованное значение для точного сопоставления строк отчёта."""
+        return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+    async def _product_identity_lookup(self) -> tuple[set[str], dict[str, str]]:
+        """Построить lookup реальных SKU из products.
+
+        Возвращает:
+            product_skus: множество master_sku.
+            aliases: точные алиасы -> master_sku. Алиасы намеренно строгие:
+                master_sku и нормализованный title. Нечёткий поиск здесь опасен,
+                потому что может связать бонус с неправильным товаром.
+        """
+        product_skus: set[str] = set()
+        aliases: dict[str, str] = {}
+        try:
+            async with aiosqlite.connect(self._db_path) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT master_sku, title FROM products") as cursor:
+                    async for row in cursor:
+                        sku = str(row["master_sku"] or "").strip()
+                        if not sku:
+                            continue
+                        product_skus.add(sku)
+                        aliases[self._identity_key(sku)] = sku
+                        title_key = self._identity_key(row["title"])
+                        if title_key:
+                            aliases.setdefault(title_key, sku)
+        except Exception as exc:
+            logger.debug("MarketingScraper: product identity lookup недоступен: %s", exc)
+        return product_skus, aliases
+
+    def _resolve_row_product_sku(
+        self,
+        row: AdCampaignData | BonusData,
+        product_skus: set[str],
+        aliases: dict[str, str],
+    ) -> str | None:
+        """Найти реальный SKU для строки отчёта без fuzzy-сопоставления."""
+        raw_sku = (row.product_sku or "").strip()
+        if raw_sku in product_skus:
+            return raw_sku
+
+        product_name = (row.product_name or "").strip()
+        direct_alias = aliases.get(self._identity_key(product_name))
+        if direct_alias:
+            return direct_alias
+
+        for candidate in re.findall(r"\b\d{5,12}\b", product_name):
+            if candidate in product_skus:
+                return candidate
+
+        if self._is_real_product_sku(raw_sku) and raw_sku in product_skus:
+            return raw_sku
+
+        return None
+
+    async def _normalize_report_product_skus(
+        self,
+        rows: list[AdCampaignData | BonusData],
+    ) -> None:
+        """Заменить surrogate/короткие ключи отчёта на products.master_sku, если возможно."""
+        if not rows:
+            return
+
+        product_skus, aliases = await self._product_identity_lookup()
+        if not product_skus:
+            return
+
+        changed = 0
+        for row in rows:
+            resolved = self._resolve_row_product_sku(row, product_skus, aliases)
+            if resolved and resolved != row.product_sku:
+                row.product_sku = resolved
+                changed += 1
+
+        if changed:
+            logger.info("MarketingScraper: нормализовано SKU строк отчёта: %d", changed)
+
+    async def get_report_identity_diagnostics(
+        self,
+        rows: list[AdCampaignData | BonusData],
+    ) -> dict[str, int]:
+        """Диагностика качества идентификаторов в распарсенных строках отчёта."""
+        product_skus, _aliases = await self._product_identity_lookup()
+        total = len(rows)
+        real_sku_count = sum(1 for row in rows if self._is_real_product_sku(row.product_sku))
+        surrogate_sku_count = sum(
+            1 for row in rows
+            if str(row.product_sku or "").startswith("RPT-")
+            or not self._is_real_product_sku(row.product_sku)
+        )
+        product_match_count = sum(1 for row in rows if row.product_sku in product_skus)
+        return {
+            "total": total,
+            "real_sku_count": real_sku_count,
+            "surrogate_sku_count": surrogate_sku_count,
+            "product_match_count": product_match_count,
+        }
 
     @staticmethod
     def _deduplicate_bonuses(items: list[BonusData]) -> list[BonusData]:

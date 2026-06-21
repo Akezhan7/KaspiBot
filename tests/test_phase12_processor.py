@@ -80,6 +80,7 @@ async def _insert(
     bonus_percent: float = 0.0,
     source: str = "kaspi_marketing",
     scraped_at: str | None = None,
+    period_days: int = 7,
 ) -> int:
     return await ads_db.save_campaign(
         {
@@ -95,6 +96,7 @@ async def _insert(
             "revenue": revenue,
             "bonus_active": bonus_active,
             "bonus_percent": bonus_percent,
+            "period_days": period_days,
         }
     )
 
@@ -219,6 +221,31 @@ async def test_get_products_without_bonuses_uses_bonus_source_only(ads_db):
 
 
 @pytest.mark.asyncio
+async def test_get_products_without_bonuses_treats_any_split_source_active_as_bonus(ads_db):
+    """Для общего счётчика достаточно активного бонуса в любом bonus-source."""
+    ts = "2024-02-01 10:00:00"
+    await _insert(
+        ads_db,
+        "SPLIT-ACTIVE",
+        source="kaspi_bonus_seller",
+        bonus_active=1,
+        scraped_at=ts,
+    )
+    await _insert(
+        ads_db,
+        "SPLIT-ACTIVE",
+        source="kaspi_bonus_review",
+        bonus_active=0,
+        scraped_at="2024-02-02 10:00:00",
+    )
+
+    rows = await ads_db.get_products_without_bonuses()
+
+    skus = [r["product_sku"] for r in rows]
+    assert "SPLIT-ACTIVE" not in skus
+
+
+@pytest.mark.asyncio
 async def test_get_most_clickable_sorted_by_ctr(ads_db):
     await _insert(ads_db, "LOW-CTR", ctr=0.3, impressions=500)
     await _insert(ads_db, "HIGH-CTR", ctr=9.5, impressions=800)
@@ -244,6 +271,31 @@ async def test_get_bonuses_status_returns_latest_per_sku(ads_db):
     assert len(rows) == 1
     assert rows[0]["bonus_active"] == 1
     assert rows[0]["bonus_percent"] == pytest.approx(8.0)
+
+
+@pytest.mark.asyncio
+async def test_get_bonuses_status_includes_split_bonus_sources(ads_db):
+    """Новый scraper пишет seller/review бонусы в разные source."""
+    await _insert(
+        ads_db,
+        "BNS-SELLER",
+        source="kaspi_bonus_seller",
+        bonus_active=1,
+        bonus_percent=5.0,
+    )
+    await _insert(
+        ads_db,
+        "BNS-REVIEW",
+        source="kaspi_bonus_review",
+        bonus_active=1,
+        bonus_percent=7.0,
+    )
+
+    rows = await ads_db.get_bonuses_status()
+    by_sku = {row["product_sku"]: row for row in rows}
+
+    assert by_sku["BNS-SELLER"]["bonus_active"] == 1
+    assert by_sku["BNS-REVIEW"]["bonus_active"] == 1
 
 
 @pytest.mark.asyncio
@@ -405,12 +457,41 @@ async def test_processor_get_top_performers_excludes_no_revenue(processor, ads_d
 
 @pytest.mark.asyncio
 async def test_processor_get_no_bonus_products(processor, ads_db):
+    await _insert(ads_db, "NO-BNS-P", spend=100.0)
     await _insert(ads_db, "NO-BNS-P", source="kaspi_bonus", bonus_active=0)
 
     result = await processor.get_no_bonus_products()
 
     skus = [r["sku"] for r in result]
     assert "NO-BNS-P" in skus
+
+
+@pytest.mark.asyncio
+async def test_processor_get_no_bonus_products_respects_split_bonus_sources(processor, ads_db):
+    await _insert(ads_db, "HAS-SELLER-BONUS", spend=100.0)
+    await _insert(
+        ads_db,
+        "HAS-SELLER-BONUS",
+        source="kaspi_bonus_seller",
+        bonus_active=1,
+        bonus_percent=5.0,
+    )
+    await _insert(ads_db, "HAS-REVIEW-BONUS", spend=100.0)
+    await _insert(
+        ads_db,
+        "HAS-REVIEW-BONUS",
+        source="kaspi_bonus_review",
+        bonus_active=1,
+        bonus_percent=7.0,
+    )
+    await _insert(ads_db, "NO-BONUS-AT-ALL", spend=100.0)
+
+    result = await processor.get_no_bonus_products()
+    skus = {r["sku"] for r in result}
+
+    assert "NO-BONUS-AT-ALL" in skus
+    assert "HAS-SELLER-BONUS" not in skus
+    assert "HAS-REVIEW-BONUS" not in skus
 
 
 @pytest.mark.asyncio

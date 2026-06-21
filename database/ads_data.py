@@ -15,6 +15,8 @@ from config import now_kz_str
 
 logger = logging.getLogger(__name__)
 
+BONUS_SOURCES = ("kaspi_bonus", "kaspi_bonus_seller", "kaspi_bonus_review")
+
 
 class AdsDataDB:
     """CRUD для таблицы ads_data (рекламные метрики по SKU)."""
@@ -151,32 +153,30 @@ class AdsDataDB:
                 return [dict(row) async for row in cursor]
 
     async def get_products_without_bonuses(self) -> list[dict]:
-        """Товары без активных бонусов (по последним данным source='kaspi_bonus')."""
+        """Товары без активных бонусов по всем bonus-source."""
+        placeholders = ",".join("?" for _ in BONUS_SOURCES)
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """
-                WITH ranked_bonus AS (
+                f"""
+                WITH bonus_status AS (
                     SELECT product_sku,
-                           bonus_active,
-                           bonus_percent,
-                           scraped_at,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY product_sku
-                               ORDER BY scraped_at DESC, id DESC
-                           ) AS rn
+                           MAX(COALESCE(bonus_active, 0)) AS bonus_active,
+                           MAX(COALESCE(bonus_percent, 0)) AS bonus_percent,
+                           MAX(scraped_at) AS scraped_at
                     FROM ads_data
-                    WHERE source = 'kaspi_bonus'
+                    WHERE source IN ({placeholders})
+                    GROUP BY product_sku
                 )
                 SELECT product_sku,
                        bonus_active,
                        bonus_percent,
                        scraped_at
-                FROM ranked_bonus
-                WHERE rn = 1
-                  AND bonus_active = 0
+                FROM bonus_status
+                WHERE bonus_active = 0
                 ORDER BY product_sku
                 """,
+                BONUS_SOURCES,
             ) as cursor:
                 return [dict(row) async for row in cursor]
 
@@ -212,31 +212,34 @@ class AdsDataDB:
                 return [dict(row) async for row in cursor]
 
     async def get_bonuses_status(self) -> list[dict]:
-        """Актуальный статус бонусов: последняя запись по каждому SKU из source='kaspi_bonus'."""
+        """Актуальный статус бонусов по SKU из legacy/seller/review источников.
+
+        Для агрегата "есть любой бонус" активная запись из любого bonus-source
+        считается активным бонусом.
+        """
+        placeholders = ",".join("?" for _ in BONUS_SOURCES)
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                """
-                WITH ranked_bonus AS (
+                f"""
+                WITH latest_bonus AS (
                     SELECT product_sku,
                            bonus_active,
                            bonus_percent,
                            scraped_at,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY product_sku
-                               ORDER BY scraped_at DESC, id DESC
-                           ) AS rn
+                           id
                     FROM ads_data
-                    WHERE source = 'kaspi_bonus'
+                    WHERE source IN ({placeholders})
                 )
                 SELECT product_sku,
-                       bonus_active,
-                       bonus_percent,
-                       scraped_at
-                FROM ranked_bonus
-                WHERE rn = 1
+                       MAX(COALESCE(bonus_active, 0)) AS bonus_active,
+                       MAX(COALESCE(bonus_percent, 0)) AS bonus_percent,
+                       MAX(scraped_at) AS scraped_at
+                FROM latest_bonus
+                GROUP BY product_sku
                 ORDER BY product_sku
                 """,
+                BONUS_SOURCES,
             ) as cursor:
                 return [dict(row) async for row in cursor]
 

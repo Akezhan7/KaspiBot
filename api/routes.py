@@ -813,6 +813,7 @@ async def _handle_wasted_budget(request: web.Request) -> web.Response:
     deps = request.app[_DEPS_KEY]
     processor: "AdsAnalyticsProcessor" = deps["processor"]
     products_db: "ProductsDB" = deps["products_db"]
+    ads_db: "AdsDataDB" = deps["ads_db"]
 
     try:
         threshold = float(request.rel_url.query.get("threshold", "0"))

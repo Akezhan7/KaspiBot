@@ -525,8 +525,8 @@ async def _seed_ads_data(db_path: Path) -> None:
     ps_db = ProductSellersDB(str(db_path))
 
     # Добавить 2 товара
-    await products_db.add_product("SKU001", "https://kaspi.kz/p/sku001", "Товар 1")
-    await products_db.add_product("SKU002", "https://kaspi.kz/p/sku002", "Товар 2")
+    await products_db.add_product("SKU001", "https://kaspi.kz/p/sku001", "Шуруповерт тестовый")
+    await products_db.add_product("SKU002", "https://kaspi.kz/p/sku002", "Набор инструментов тестовый")
 
     scraped_at = now_kz_str()
 
@@ -635,7 +635,7 @@ async def test_product_detail_found(seeded_db):
                 assert r.status == 200
                 data = await r.json()
                 assert data["sku"] == "SKU001"
-                assert data["title"] == "Товар 1"
+                assert data["title"] == "Шуруповерт тестовый"
                 assert "roi" in data
                 assert "roas" in data
                 assert "cpc_efficiency" in data
@@ -666,6 +666,8 @@ async def test_wasted_budget_contains_sku002(seeded_db):
                 skus = [item["sku"] for item in data["items"]]
                 assert "SKU002" in skus
                 assert "SKU001" not in skus  # SKU001 прибылен
+                sku002 = next(item for item in data["items"] if item["sku"] == "SKU002")
+                assert sku002["title"] == "Набор инструментов тестовый"
     finally:
         await server.stop()
 
@@ -709,14 +711,14 @@ async def test_no_bonus_contains_sku002(seeded_db):
 
 
 @pytest.mark.asyncio
-async def test_products_filters_bonus_and_roi(seeded_db):
-    """GET /api/products поддерживает фильтрацию по bonus и roi."""
+async def test_products_filters_missing_bonus_seller(seeded_db):
+    """GET /api/products поддерживает актуальный фильтр missing=bonus_seller."""
     port = _next_port()
     server = await _make_server(seeded_db, port)
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
-                f"http://127.0.0.1:{port}/api/products?bonus=without&roi=negative",
+                f"http://127.0.0.1:{port}/api/products?missing=bonus_seller",
                 headers=admin_headers(),
             ) as r:
                 assert r.status == 200
