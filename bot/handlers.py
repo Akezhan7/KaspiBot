@@ -1810,6 +1810,7 @@ async def send_seller_products_whatsapp(callback: CallbackQuery):
             "phone_missing": "У продавца нет телефона",
             "no_active_products": "У продавца нет активных товаров",
             "rate_limited": "Достигнут лимит сообщений этому продавцу",
+            "send_in_progress": "Отправка этому продавцу уже выполняется",
             "whatsapp_error": "WhatsApp временно недоступен",
             "send_failed": "Не удалось отправить первое предупреждение",
         }

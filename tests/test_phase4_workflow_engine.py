@@ -151,8 +151,8 @@ async def test_on_new_seller_adds_to_existing(db_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_manual_products_send_uses_warn1_and_records_snapshot(db_path):
-    """Первое ручное сообщение использует WARN1 и фиксирует прогресс."""
+async def test_manual_products_send_uses_short_template_and_records_snapshot(db_path):
+    """Ручная отправка всегда использует короткий список, а не WARN1."""
     await _init_db(db_path)
     await _seed_seller(db_path)
     await _seed_product(db_path, "SKU001", title="Активный товар")
@@ -174,18 +174,24 @@ async def test_manual_products_send_uses_warn1_and_records_snapshot(db_path):
     result = await engine.send_products_to_seller("M001")
 
     assert result.success is True
-    assert result.sent_warn1 is True
+    assert result.sent_warn1 is False
     assert result.product_count == 1
     assert result.workflow_id is not None
 
     sent_text = wa_client.send_text.call_args.args[1]
+    assert "По итогам разговора" in sent_text
     assert "Активный товар" in sent_text
     assert "Снятый товар" not in sent_text
 
     workflow = await SellerWorkflowDB(db_path).get_workflow(result.workflow_id)
-    assert workflow["status"] == "WARN1_SENT"
+    assert workflow["status"] == "NEW_SELLER_ATTACH"
+    assert workflow["warn1_sent_at"] is None
     assert workflow["manual_products_initial_count"] == 1
     assert workflow["manual_products_sent_at"] is not None
+
+    messages = await MessageLogDB(db_path).get_messages_for_workflow(result.workflow_id)
+    assert len(messages) == 1
+    assert messages[0]["template_code"] == "MANUAL_PRODUCT_LIST"
 
 
 @pytest.mark.asyncio
@@ -231,6 +237,40 @@ async def test_manual_products_send_after_warn1_keeps_status(db_path):
 
 
 @pytest.mark.asyncio
+async def test_manual_products_send_ignores_daily_message_limit(db_path):
+    """Ручная отправка не блокируется дневным лимитом автоматических сообщений."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(db_path, title="Товар после звонка")
+    await _seed_product_seller(db_path)
+
+    wf_db = SellerWorkflowDB(db_path)
+    wf_id = await wf_db.create_workflow("M001")
+    await wf_db.add_product_to_workflow(wf_id, "SKU001")
+    await wf_db.update_status(wf_id, "WARN1_SENT")
+
+    log_db = MessageLogDB(db_path)
+    for idx in range(3):
+        await log_db.log_message(
+            workflow_id=wf_id,
+            seller_id="M001",
+            direction="OUT",
+            text=f"Автоматическое сообщение {idx}",
+            template_code="WARN_AUTO",
+        )
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(return_value={"idMessage": "manual"})
+    engine = _make_engine(db_path, wa_client=wa_client)
+
+    result = await engine.send_products_to_seller("M001")
+
+    assert result.success is True
+    assert result.reason == "sent"
+    wa_client.send_text.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_manual_products_concurrent_clicks_send_once(db_path):
     """Два быстрых ручных нажатия не дублируют сообщение."""
     await _init_db(db_path)
@@ -269,7 +309,7 @@ async def test_manual_products_concurrent_clicks_send_once(db_path):
     assert send_count == 1
     assert first_result.success is True
     assert second_result.success is False
-    assert second_result.reason == "rate_limited"
+    assert second_result.reason == "send_in_progress"
 
 
 @pytest.mark.asyncio

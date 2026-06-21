@@ -361,6 +361,9 @@ class WorkflowEngine:
     ) -> ManualProductSendResult:
         """Выполнить ручную отправку без дублей от быстрых повторных нажатий."""
         lock = self._manual_send_locks.setdefault(seller_id, asyncio.Lock())
+        if lock.locked():
+            return ManualProductSendResult(False, "send_in_progress")
+
         async with lock:
             return await self._send_products_to_seller_once(seller_id)
 
@@ -370,9 +373,8 @@ class WorkflowEngine:
         """
         Вручную отправить продавцу все актуальные товары.
 
-        Для новой воронки используется обычный WARN1. Если WARN1 уже был,
-        отправляется короткий список без изменения статуса и таймеров
-        автоматической эскалации.
+        Ручная отправка не использует WARN1/WARN2 и не применяет дневные
+        антиспам-лимиты: это осознанное действие оператора после звонка.
         """
         seller = await self._sellers_db.get_seller_with_products(seller_id)
         if not seller:
@@ -393,95 +395,55 @@ class WorkflowEngine:
         else:
             workflow_id = workflow["id"]
 
-        last_manual_sent = workflow.get("manual_products_sent_at")
-        if last_manual_sent:
-            try:
-                sent_at = datetime.fromisoformat(last_manual_sent)
-                elapsed_hours = (
-                    now_kz().replace(tzinfo=None) - sent_at
-                ).total_seconds() / 3600
-                if elapsed_hours < MIN_HOURS_BETWEEN_MESSAGES:
-                    return ManualProductSendResult(
-                        False,
-                        "rate_limited",
-                        workflow_id=workflow_id,
-                        product_count=len(products),
-                    )
-            except (TypeError, ValueError):
-                pass
-
         for product in products:
             await self._workflow_db.add_product_to_workflow(
                 workflow_id, product["product_id"]
             )
 
-        sent_warn1 = workflow.get("status") == "NEW_SELLER_ATTACH"
-        if sent_warn1:
-            if not await self.send_warn1(workflow_id):
-                refreshed = await self._workflow_db.get_workflow(workflow_id)
-                if not refreshed or refreshed.get("status") != "WARN1_SENT":
-                    return ManualProductSendResult(
-                        False,
-                        "send_failed",
-                        workflow_id=workflow_id,
-                        product_count=len(products),
-                        sent_warn1=True,
-                    )
-        else:
-            if not await self._can_send_message(
-                seller_id, skip_interval_check=True
-            ):
-                return ManualProductSendResult(
-                    False,
-                    "rate_limited",
-                    workflow_id=workflow_id,
-                    product_count=len(products),
-                )
-
-            product_lines = []
-            for product in products:
-                title = product.get("title") or "Товар"
-                url = product.get("url") or (
-                    f"https://kaspi.kz/shop/p/{product['product_id']}/"
-                )
-                product_lines.append(f"• {title}\n  {url}")
-
-            text = (
-                "По итогам разговора направляем актуальный список карточек, "
-                "от которых необходимо отсоединиться:\n\n"
-                + "\n\n".join(product_lines)
+        product_lines = []
+        for product in products:
+            title = product.get("title") or "Товар"
+            url = product.get("url") or (
+                f"https://kaspi.kz/shop/p/{product['product_id']}/"
             )
+            product_lines.append(f"• {title}\n  {url}")
 
-            try:
-                await asyncio.sleep(random.uniform(
-                    WHATSAPP_SEND_DELAY_MIN, WHATSAPP_SEND_DELAY_MAX
-                ))
-                result = await self._whatsapp.send_text(seller["phone"], text)
-                wa_message_id = result.get("idMessage")
-            except Exception as e:
-                logger.error(
-                    f"Ошибка ручной отправки товаров продавцу {seller_id}: {e}"
-                )
-                await self._notifications.send_to_admins(
-                    f"<b>Ошибка ручной отправки WhatsApp</b>\n\n"
-                    f"Продавец: {seller.get('merchant_name')}\n"
-                    f"Ошибка: {e}"
-                )
-                return ManualProductSendResult(
-                    False,
-                    "whatsapp_error",
-                    workflow_id=workflow_id,
-                    product_count=len(products),
-                )
+        text = (
+            "По итогам разговора направляем актуальный список карточек, "
+            "от которых необходимо отсоединиться:\n\n"
+            + "\n\n".join(product_lines)
+        )
 
-            await self._message_log_db.log_message(
+        try:
+            await asyncio.sleep(random.uniform(
+                WHATSAPP_SEND_DELAY_MIN, WHATSAPP_SEND_DELAY_MAX
+            ))
+            result = await self._whatsapp.send_text(seller["phone"], text)
+            wa_message_id = result.get("idMessage")
+        except Exception as e:
+            logger.error(
+                f"Ошибка ручной отправки товаров продавцу {seller_id}: {e}"
+            )
+            await self._notifications.send_to_admins(
+                f"<b>Ошибка ручной отправки WhatsApp</b>\n\n"
+                f"Продавец: {seller.get('merchant_name')}\n"
+                f"Ошибка: {e}"
+            )
+            return ManualProductSendResult(
+                False,
+                "whatsapp_error",
                 workflow_id=workflow_id,
-                seller_id=seller_id,
-                direction="OUT",
-                text=text,
-                template_code="MANUAL_PRODUCT_LIST",
-                wa_message_id=wa_message_id,
+                product_count=len(products),
             )
+
+        await self._message_log_db.log_message(
+            workflow_id=workflow_id,
+            seller_id=seller_id,
+            direction="OUT",
+            text=text,
+            template_code="MANUAL_PRODUCT_LIST",
+            wa_message_id=wa_message_id,
+        )
 
         await self._workflow_db.record_manual_products_sent(
             workflow_id, len(products)
@@ -491,7 +453,7 @@ class WorkflowEngine:
             "sent",
             workflow_id=workflow_id,
             product_count=len(products),
-            sent_warn1=sent_warn1,
+            sent_warn1=False,
         )
 
     async def handle_incoming_message(
