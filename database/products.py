@@ -98,10 +98,14 @@ class ProductsDB:
             raise
     
     async def delete_product(self, master_sku: str) -> bool:
-        """Удалить товар (каскадно удалит связи)"""
+        """Удалить товар и зависимые связи."""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("PRAGMA foreign_keys = ON")
+                await db.execute(
+                    "DELETE FROM workflow_products WHERE product_id = ?",
+                    (master_sku,)
+                )
                 cursor = await db.execute(
                     "DELETE FROM products WHERE master_sku = ?",
                     (master_sku,)
@@ -151,6 +155,30 @@ class ProductsDB:
                 logger.debug(f"Обновлено название товара {master_sku}: {title[:50]}")
         except Exception as e:
             logger.error(f"Ошибка обновления названия для {master_sku}: {e}")
+            raise
+
+    async def update_product_url(self, master_sku: str, url: str) -> bool:
+        """Обновить ссылку товара."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    """
+                    UPDATE products
+                    SET url = ?
+                    WHERE master_sku = ?
+                    """,
+                    (url, master_sku)
+                )
+                await db.commit()
+
+                if cursor.rowcount > 0:
+                    logger.info(f"Обновлена ссылка товара {master_sku}")
+                    return True
+
+                logger.warning(f"Товар не найден для обновления ссылки: {master_sku}")
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка обновления ссылки для {master_sku}: {e}")
             raise
     
     async def get_products_count(self) -> int:

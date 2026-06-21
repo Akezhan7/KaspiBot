@@ -33,6 +33,10 @@ class SellerSearchFSM(StatesGroup):
     waiting_query = State()
 
 
+class ProductUrlEditFSM(StatesGroup):
+    waiting_url = State()
+
+
 MENU_BUTTONS = [
     "Мои товары",
     "Все продавцы",
@@ -506,8 +510,12 @@ async def show_product_sellers(callback: CallbackQuery):
         
         # Формируем сообщение
         title = product.get('title') or 'Без названия'
+        product_url = product.get('url') or ''
         text = f"<b>{title}</b>\n\n"
         text += f"<b>SKU:</b> {hcode(sku)}\n"
+        if product_url:
+            safe_url = html.escape(product_url, quote=True)
+            text += f"<b>Ссылка:</b> <a href='{safe_url}'>открыть</a>\n"
         
         if not sellers_list:
             # Если продавцов нет - показываем это
@@ -601,6 +609,12 @@ async def show_product_sellers(callback: CallbackQuery):
         
         # Кнопка "Удалить товар" (только для админов)
         if is_admin(callback.from_user.id):
+            keyboard.append([
+                InlineKeyboardButton(
+                    text="Редактировать ссылку",
+                    callback_data=f"edit_product_url_{sku}_{list_page}"
+                )
+            ])
             keyboard.append([
                 InlineKeyboardButton(text="Удалить товар", callback_data=f"confirm_delete_{sku}_{list_page}")
             ])
@@ -951,6 +965,145 @@ async def cmd_stats(message: Message):
 
 
 # Команда /scan обрабатывается в main.py для доступа к scanner объекту
+
+
+@router.callback_query(F.data.startswith("edit_product_url_"))
+async def start_edit_product_url(callback: CallbackQuery, state: FSMContext):
+    """Запустить редактирование ссылки товара."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Доступно только администраторам", show_alert=True)
+        return
+
+    try:
+        payload = callback.data.removeprefix("edit_product_url_")
+        sku, list_page_raw = payload.rsplit("_", 1)
+        list_page = int(list_page_raw)
+
+        product = await ProductsDB(Config.DB_PATH).get_product(sku)
+        if not product:
+            await callback.answer("Товар не найден", show_alert=True)
+            return
+
+        await state.update_data(product_sku=sku, list_page=list_page)
+        await state.set_state(ProductUrlEditFSM.waiting_url)
+
+        current_url = product.get("url") or "не указана"
+        title = product.get("title") or "Без названия"
+        await callback.message.edit_text(
+            "<b>Редактирование ссылки товара</b>\n\n"
+            f"<b>Название:</b> {html.escape(title)}\n"
+            f"<b>SKU:</b> {hcode(sku)}\n"
+            f"<b>Текущая ссылка:</b>\n{html.escape(current_url)}\n\n"
+            "Отправьте новую публичную ссылку Kaspi на этот же товар.\n"
+            "Бот проверит, что ссылка относится к этому SKU.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Отмена",
+                        callback_data=f"cancel_product_url_edit_{sku}_{list_page}"
+                    )
+                ]
+            ]),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка запуска редактирования ссылки товара: {e}", exc_info=True)
+        await callback.answer("Ошибка", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("cancel_product_url_edit_"))
+async def cancel_product_url_edit(callback: CallbackQuery, state: FSMContext):
+    """Отменить редактирование ссылки товара."""
+    await state.clear()
+    try:
+        payload = callback.data.removeprefix("cancel_product_url_edit_")
+        sku, list_page_raw = payload.rsplit("_", 1)
+        list_page = int(list_page_raw)
+    except ValueError:
+        sku = ""
+        list_page = 1
+
+    keyboard = []
+    if sku:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="Открыть карточку товара",
+                callback_data=f"product_{sku}_1_{list_page}"
+            )
+        ])
+
+    await callback.message.edit_text(
+        "Редактирование ссылки отменено",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None,
+    )
+    await callback.answer()
+
+
+@router.message(ProductUrlEditFSM.waiting_url, F.text)
+async def process_product_url_edit(message: Message, state: FSMContext):
+    """Сохранить новую ссылку товара."""
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        await message.answer("Доступно только администраторам")
+        return
+
+    data = await state.get_data()
+    sku = data.get("product_sku")
+    list_page = int(data.get("list_page") or 1)
+    url = message.text.strip()
+
+    if not sku:
+        await state.clear()
+        await message.answer("Не удалось определить товар для редактирования")
+        return
+
+    if "kaspi.kz" not in url:
+        await message.answer(
+            "Это не похоже на ссылку Kaspi.\n\n"
+            "Отправьте публичную ссылку на этот же товар."
+        )
+        return
+
+    new_sku = await KaspiParser.extract_master_sku_async(url)
+    if not new_sku:
+        await message.answer(
+            "Не удалось извлечь SKU из ссылки.\n\n"
+            "Проверьте ссылку и отправьте ещё раз."
+        )
+        return
+
+    if new_sku != sku:
+        await message.answer(
+            "<b>Ссылка относится к другому товару</b>\n\n"
+            f"Текущий SKU: {hcode(sku)}\n"
+            f"SKU из ссылки: {hcode(new_sku)}\n\n"
+            "Отправьте ссылку именно на текущий товар.",
+            parse_mode="HTML",
+        )
+        return
+
+    updated = await ProductsDB(Config.DB_PATH).update_product_url(sku, url)
+    await state.clear()
+
+    if not updated:
+        await message.answer("Товар не найден. Возможно, его уже удалили.")
+        return
+
+    await message.answer(
+        "<b>Ссылка товара обновлена</b>\n\n"
+        f"<b>SKU:</b> {hcode(sku)}\n"
+        f"<b>Новая ссылка:</b>\n{html.escape(url)}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Открыть карточку товара",
+                    callback_data=f"product_{sku}_1_{list_page}"
+                )
+            ]
+        ]),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("confirm_delete_"))

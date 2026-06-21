@@ -208,6 +208,69 @@ async def test_search_sellers_by_name_id_and_phone_with_manual_fields(db_path):
 
 
 @pytest.mark.asyncio
+async def test_delete_product_removes_workflow_links(db_path):
+    """Удаление товара чистит workflow_products и не падает по foreign key."""
+    await _init_db(db_path)
+
+    sellers = SellersDB(db_path)
+    products = ProductsDB(db_path)
+    workflows = SellerWorkflowDB(db_path)
+
+    await sellers.add_seller("MDEL", "Delete Shop")
+    await products.add_product(
+        "SKUDEL",
+        "https://kaspi.kz/shop/p/private-link-SKUDEL/",
+        "Товар на удаление",
+    )
+    wf_id = await workflows.create_workflow("MDEL")
+    await workflows.add_product_to_workflow(wf_id, "SKUDEL")
+
+    deleted = await products.delete_product("SKUDEL")
+    workflow_products = await workflows.get_workflow_products(wf_id)
+
+    assert deleted is True
+    assert await products.get_product("SKUDEL") is None
+    assert workflow_products == []
+
+
+@pytest.mark.asyncio
+async def test_update_product_url(db_path):
+    """Ссылка товара обновляется без изменения SKU."""
+    await _init_db(db_path)
+
+    products = ProductsDB(db_path)
+    await products.add_product(
+        "SKUURL",
+        "https://kaspi.kz/merchantcabinet/private/SKUURL",
+        "Товар со старой ссылкой",
+    )
+
+    updated = await products.update_product_url(
+        "SKUURL",
+        "https://kaspi.kz/shop/p/public-product-SKUURL/",
+    )
+    product = await products.get_product("SKUURL")
+
+    assert updated is True
+    assert product["url"] == "https://kaspi.kz/shop/p/public-product-SKUURL/"
+
+
+@pytest.mark.asyncio
+async def test_update_product_url_returns_false_for_missing_product(db_path):
+    """Обновление ссылки несуществующего товара возвращает False."""
+    await _init_db(db_path)
+
+    products = ProductsDB(db_path)
+
+    updated = await products.update_product_url(
+        "MISSING",
+        "https://kaspi.kz/shop/p/public-product-MISSING/",
+    )
+
+    assert updated is False
+
+
+@pytest.mark.asyncio
 async def test_workflow_update_status_if(db_path):
     """Оптимистичная блокировка при смене статуса"""
     await _init_db(db_path)
