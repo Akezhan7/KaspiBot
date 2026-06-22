@@ -112,7 +112,6 @@ export default function ProductDetailPage() {
 
   const bonusActive =
     latest.bonus_active === 1 || latest.bonus_active === true;
-  const bonusPercent = num(latest.bonus_percent);
   const hasBonusData = latest.bonus_scraped_at != null;
 
   const chartData = data.trends.map((t) => ({
@@ -162,7 +161,7 @@ export default function ProductDetailPage() {
           className={`bonus-badge ${bonusActive ? "bonus-active" : "bonus-inactive"}`}
         >
           {bonusActive
-            ? `Любой бонус активен: ${bonusPercent ?? "—"}%`
+            ? "Любой бонус активен"
             : "Бонусы не активны"}
           <span className="bonus-icon-wrap">
             {bonusActive ? <Gift size={14} /> : <CircleX size={14} />}
@@ -298,7 +297,7 @@ function BonusSectionCard({
       <div className="section-card-header">
         <span className="section-card-title">{title}</span>
         <span className={`section-status section-status-${section.activity}`}>
-          {section.active ? `${section.percent}%` : STATUS_LABEL[section.activity]}
+          {section.active ? "Активен" : STATUS_LABEL[section.activity]}
         </span>
       </div>
       {section.campaign_name && (
@@ -311,12 +310,6 @@ function BonusSectionCard({
       )}
     </div>
   );
-}
-
-function num(v: unknown): number | null {
-  if (v == null) return null;
-  const n = typeof v === "number" ? v : parseFloat(String(v));
-  return Number.isFinite(n) ? n : null;
 }
 
 function fmt(v: number | undefined | null): string {

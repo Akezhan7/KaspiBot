@@ -1121,9 +1121,12 @@ class MarketingScraper:
 
         if header_idx is not None:
             headers = [self._normalize_header(v) for v in rows[header_idx]]
-            idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description"])
+            idx_name = self._find_product_name_column(headers)
+            idx_sku = self._find_product_sku_column(headers)
             idx_status = self._find_col(headers, ["статус", "состоя", "active", "status", "state"])
-            idx_percent = self._find_col(headers, ["бонус", "процент", "%", "bonus"])
+            # Денежная колонка «Выплачено бонусов клиентам» не является
+            # процентом бонуса и не должна попадать в bonus_percent.
+            idx_percent = self._find_col(headers, ["процент", "%", "percent"])
             data_rows = rows[header_idx + 1 :]
 
         bonuses: list[BonusData] = []
@@ -1152,7 +1155,8 @@ class MarketingScraper:
             if bonus_percent <= 0 and not bonus_active and len(values) < 2:
                 continue
 
-            sku = self._extract_or_build_sku(product_name)
+            raw_sku = self._cell_value(raw_row, idx_sku)
+            sku = raw_sku if self._is_real_product_sku(raw_sku) else self._extract_or_build_sku(product_name)
             bonuses.append(
                 BonusData(
                     product_sku=sku,
@@ -1250,12 +1254,12 @@ class MarketingScraper:
             return fallback_rows
 
         headers = [self._normalize_header(v) for v in rows[header_idx]]
-        idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description"])
-        idx_sku_col = self._find_col(headers, ["артикул", "код товара", "id товара", "product id", "product_id", "sku", "articul"])
+        idx_name = self._find_product_name_column(headers)
+        idx_sku_col = self._find_product_sku_column(headers)
         idx_clicks = self._find_col(headers, ["клик", "переход", "click"])
         idx_cpc = self._find_col(headers, ["ср. стоим", "средняя стоим", "cpc", "avg cost"])
         idx_spend = self._find_spend_column(headers)
-        idx_impressions = self._find_col(headers, ["показ", "impression"])
+        idx_impressions = self._find_col(headers, ["показ", "просмотр", "impression"])
         idx_ctr = self._find_col(headers, ["ctr", "кликабель", "click through"])
 
         if idx_name is None or idx_clicks is None or (idx_spend is None and idx_cpc is None):
@@ -1581,12 +1585,12 @@ class MarketingScraper:
             return fallback_rows
 
         headers = [self._normalize_header(v) for v in rows[header_idx]]
-        idx_name = self._find_col(headers, ["наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description"])
-        idx_sku_col = self._find_col(headers, ["артикул", "код товара", "id товара", "product id", "product_id", "sku", "articul"])
+        idx_name = self._find_product_name_column(headers)
+        idx_sku_col = self._find_product_sku_column(headers)
         idx_clicks = self._find_col(headers, ["клик", "переход", "click"])
         idx_cpc = self._find_col(headers, ["ср. стоим", "средняя стоим", "cpc", "avg cost"])
         idx_spend = self._find_spend_column(headers)
-        idx_impressions = self._find_col(headers, ["показ", "impression"])
+        idx_impressions = self._find_col(headers, ["показ", "просмотр", "impression"])
         idx_ctr = self._find_col(headers, ["ctr", "кликабель", "click through"])
 
         if idx_name is None or idx_clicks is None or (idx_spend is None and idx_cpc is None):
@@ -1864,18 +1868,40 @@ class MarketingScraper:
                 return idx
         return None
 
+    @classmethod
+    def _find_product_name_column(cls, headers: list[str]) -> int | None:
+        """Найти именно название товара, не соседнюю SKU-колонку."""
+        for idx, header in enumerate(headers):
+            if "рекламируем" in header or header in {"sku", "артикул"}:
+                continue
+            if any(needle in header for needle in ("наимен", "назван", "товар", "product", "name", "title", "item", "описание", "description")):
+                return idx
+        return None
+
+    @classmethod
+    def _find_product_sku_column(cls, headers: list[str]) -> int | None:
+        return cls._find_col(
+            headers,
+            [
+                "рекламируемый товар", "артикул", "код товара", "id товара",
+                "product id", "product_id", "sku", "articul",
+            ],
+        )
+
     @staticmethod
     def _find_spend_column(headers: list[str]) -> int | None:
         for idx, header in enumerate(headers):
-            if (
-                ("стоим" in header or "расход" in header or "затрат" in header or "spend" in header)
-                and "сумма заказ" not in header
-            ):
+            if any(token in header for token in ("расход", "затрат", "spend", "expense")):
                 return idx
-        # fallback для англ. локали
+        # Legacy fallback: «стоимость» без упоминания клика/CPC.
         for idx, header in enumerate(headers):
             if (
-                ("cost" in header or "expense" in header)
+                ("стоим" in header or "cost" in header)
+                and "клик" not in header
+                and "cpc" not in header
+                and "ср." not in header
+                and "средн" not in header
+                and "заказ" not in header
                 and "order" not in header
             ):
                 return idx

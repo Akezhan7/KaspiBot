@@ -316,3 +316,44 @@ async def test_scraper_normalization_diagnostics_counts_surrogate_rows(tmp_path)
     assert diagnostics["total"] == 2
     assert diagnostics["real_sku_count"] == 1
     assert diagnostics["surrogate_sku_count"] == 1
+
+
+# ===========================================================================
+# Блок 7: реальные форматы CSV Kaspi Marketing
+# ===========================================================================
+
+def test_parse_marketing_csv_uses_kaspi_product_report_columns():
+    """Отчёт Kaspi содержит отдельные SKU, просмотры, CPC и расходы."""
+    payload = """\ufeffРекламируемый товар;Товар;Текущий статус;Просмотры;Клики;CTR;Ср. стоим. клика;Расходы на рекламу;Сумма заказов
+169799541;Миксер Micser черно-серебристый;Активный;278;2;0,72;41,67;83,33;0,00
+"""
+    scraper = MarketingScraper(browser_context=None, db_path=":memory:")  # type: ignore[arg-type]
+
+    rows = scraper._parse_marketing_csv(payload)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.product_sku == "169799541"
+    assert row.product_name == "Миксер Micser черно-серебристый"
+    assert row.impressions == 278
+    assert row.clicks == 2
+    assert row.ctr == pytest.approx(0.72)
+    assert row.cpc == pytest.approx(41.67)
+    assert row.spend == pytest.approx(83.33)
+
+
+def test_parse_bonus_csv_uses_report_sku_and_does_not_treat_paid_bonus_as_percent():
+    """В бонусной выгрузке SKU есть отдельно, а выплаты клиентам не являются процентом."""
+    payload = """\ufeffSKU;Наименование;Статус;Просмотры;Клики;Выплачено бонусов клиентам;Осталось товаров по акции
+169647440;Чеснокодавка 30324053_569_Чеснокодавка 1 шт, нержавеющая сталь;Активна;277;1;500,00;
+"""
+    scraper = MarketingScraper(browser_context=None, db_path=":memory:")  # type: ignore[arg-type]
+
+    rows = scraper._parse_bonus_csv(payload)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.product_sku == "169647440"
+    assert row.product_name == "Чеснокодавка 30324053_569_Чеснокодавка 1 шт, нержавеющая сталь"
+    assert row.bonus_active is True
+    assert row.bonus_percent == 0.0
