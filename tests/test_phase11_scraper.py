@@ -357,3 +357,168 @@ def test_parse_bonus_csv_uses_report_sku_and_does_not_treat_paid_bonus_as_percen
     assert row.product_name == "Чеснокодавка 30324053_569_Чеснокодавка 1 шт, нержавеющая сталь"
     assert row.bonus_active is True
     assert row.bonus_percent == 0.0
+
+
+# ===========================================================================
+# Блок 8: регрессии аналитики внешней рекламы и двух типов бонусов
+# ===========================================================================
+
+def test_deduplicate_bonuses_keeps_seller_and_review_for_same_sku():
+    """Один товар может одновременно иметь бонус продавца и бонус за отзыв."""
+    items = [
+        BonusData(
+            product_sku="169799541",
+            product_name="Товар",
+            bonus_active=True,
+            bonus_percent=0.0,
+            source="kaspi_bonus_review",
+            period_days=7,
+        ),
+        BonusData(
+            product_sku="169799541",
+            product_name="Товар",
+            bonus_active=True,
+            bonus_percent=0.0,
+            source="kaspi_bonus_seller",
+            period_days=7,
+        ),
+    ]
+
+    result = MarketingScraper._deduplicate_bonuses(items)
+
+    assert {(row.product_sku, row.source, row.period_days) for row in result} == {
+        ("169799541", "kaspi_bonus_review", 7),
+        ("169799541", "kaspi_bonus_seller", 7),
+    }
+
+
+def test_parse_marketing_csv_uses_cost_not_ad_spend_ratio():
+    """Внешний отчёт содержит и стоимость, и ДРР; расходом является стоимость."""
+    payload = """Наименование;Статус;Клики;Ср. стоим. клика;Стоимость;Сумма заказов;Заказы;В корзину;В избранное;Доля рекламных расходов
+Картон;Активная;148;13.79;2041.01;98420;7;4;14;2,1
+"""
+    scraper = MarketingScraper(browser_context=None, db_path=":memory:")  # type: ignore[arg-type]
+
+    rows = scraper._parse_marketing_csv(payload)
+
+    assert len(rows) == 1
+    assert rows[0].spend == pytest.approx(2041.01)
+
+
+def test_external_campaign_payload_builds_product_report_urls():
+    """Внешняя реклама отдаёт кампании через SPA API, а товарный отчёт идёт по campaignId."""
+    payload = {
+        "data": {
+            "items": [
+                {"id": 2031727, "name": "Картон"},
+                {"id": 2029808, "name": "Топоры"},
+            ]
+        }
+    }
+    response_url = (
+        "https://marketing.kaspi.kz/external/advertising/products/api/"
+        "v1/merchant/947041/campaigns?startDate=2026-06-16&endDate=2026-06-22"
+    )
+
+    entries = MarketingScraper._extract_external_campaign_entries(payload, response_url)
+    report_url = MarketingScraper._external_products_report_url("947041", "2031727")
+
+    assert entries == [
+        {"id": "2031727", "name": "Картон"},
+        {"id": "2029808", "name": "Топоры"},
+    ]
+    assert "merchant/947041/reports/products/xlsx" in report_url
+    assert "campaignId=2031727" in report_url
+
+
+def test_external_campaigns_response_ignores_exists_probe():
+    """Ответ `/campaigns/exists` не содержит кампании и не должен перехватываться."""
+    class ExistsResponse:
+        url = (
+            "https://marketing.kaspi.kz/external/advertising/products/api/"
+            "v1/merchant/947041/campaigns/exists"
+        )
+
+    assert MarketingScraper._is_external_campaigns_api_response(ExistsResponse()) is False
+
+
+@pytest.mark.asyncio
+async def test_scrape_external_marketing_downloads_product_reports_for_each_period(monkeypatch):
+    """External SPA API -> список кампаний -> товарные отчёты за 7 и 30 дней."""
+    class FakeCampaignsResponse:
+        url = (
+            "https://marketing.kaspi.kz/external/advertising/products/api/"
+            "v1/merchant/947041/campaigns?startDate=2026-06-16&endDate=2026-06-22"
+        )
+
+        async def json(self):
+            return {"data": {"items": [{"id": 2031727, "name": "Картон"}]}}
+
+    class FakeResponseExpectation:
+        def __init__(self, response):
+            self.response = response
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        @property
+        def value(self):
+            async def result():
+                return self.response
+            return result()
+
+    class FakeReportResponse:
+        ok = True
+        status = 200
+
+        async def body(self):
+            return (
+                b"\xd0\xa0\xd0\xb5\xd0\xba\xd0\xbb\xd0\xb0\xd0\xbc\xd0\xb8\xd1\x80\xd1\x83\xd0\xb5\xd0\xbc\xd1\x8b\xd0\xb9 \xd1\x82\xd0\xbe\xd0\xb2\xd0\xb0\xd1\x80;\xd0\xa2\xd0\xbe\xd0\xb2\xd0\xb0\xd1\x80;\xd0\x9a\xd0\xbb\xd0\xb8\xd0\xba\xd0\xb8;\xd0\xa0\xd0\xb0\xd1\x81\xd1\x85\xd0\xbe\xd0\xb4\xd1\x8b \xd0\xbd\xd0\xb0 \xd1\x80\xd0\xb5\xd0\xba\xd0\xbb\xd0\xb0\xd0\xbc\xd1\x83\n"
+                b"169799541;\xd0\xa2\xd0\xbe\xd0\xb2\xd0\xb0\xd1\x80;2;83.33\n"
+            )
+
+    class FakeRequestContext:
+        def __init__(self):
+            self.urls = []
+
+        async def get(self, url, timeout):
+            self.urls.append(url)
+            return FakeReportResponse()
+
+    class FakeBrowserContext:
+        def __init__(self):
+            self.request = FakeRequestContext()
+
+    class FakePage:
+        def __init__(self):
+            self.response = FakeCampaignsResponse()
+            self.visited_urls = []
+
+        def expect_response(self, predicate, timeout):
+            assert predicate(self.response)
+            return FakeResponseExpectation(self.response)
+
+        async def goto(self, url, wait_until, timeout):
+            self.visited_urls.append(url)
+
+    context = FakeBrowserContext()
+    page = FakePage()
+    scraper = MarketingScraper(browser_context=context, db_path=":memory:")  # type: ignore[arg-type]
+
+    async def no_delay():
+        return None
+
+    monkeypatch.setattr(scraper, "_random_delay", no_delay)
+    rows = await scraper._scrape_external_marketing(
+        page,  # type: ignore[arg-type]
+        "https://marketing.kaspi.kz/external/advertising/products/campaigns?tab=overview",
+    )
+
+    assert len(rows) == 2
+    assert {row.period_days for row in rows} == {7, 30}
+    assert {row.source for row in rows} == {"kaspi_external_ads"}
+    assert all(row.product_sku == "169799541" for row in rows)
+    assert all("campaignId=2031727" in url for url in context.request.urls)

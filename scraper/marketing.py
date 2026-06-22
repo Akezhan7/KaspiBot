@@ -16,6 +16,7 @@ import tempfile
 import zlib
 from io import BytesIO
 from datetime import date, datetime, timedelta
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
 import zipfile
@@ -73,6 +74,11 @@ _REPORT_URL_PATTERN = re.compile(
 )
 _GENERIC_REPORT_URL_PATTERN = re.compile(
     r"(?:https://marketing\.kaspi\.kz)?/[^\"'\s<]*(?:reports?|export|download)[^\"'\s<]*(?:xlsx|csv|format=xlsx|format=csv)?(?:\?[^\"'\s<]*)?"
+)
+_EXTERNAL_CAMPAIGNS_API_PATTERN = re.compile(
+    r"^https://marketing\.kaspi\.kz/external/advertising/products/api/"
+    r"v1/merchant/(?P<merchant_id>\d+)/campaigns"
+    r"(?:\?(?:[^#]*)|/state/[^/?]+(?:\?(?:[^#]*))?|$)"
 )
 
 _BONUS_STATUS_ACTIVE_KEYWORDS = {"активен", "активна", "включён", "включен", "active", "вкл"}
@@ -159,6 +165,17 @@ class MarketingScraper:
                     "MarketingScraper: переход на страницу маркетинга %s (source=%s)",
                     url, source,
                 )
+
+                if source == "kaspi_external_ads":
+                    products = await self._scrape_external_marketing(page, url)
+                    if products:
+                        logger.info(
+                            "MarketingScraper: %s → %d товаров из %d уникальных SKU",
+                            source, len(products), len({r.product_sku for r in products}),
+                        )
+                        all_products.extend(products)
+                    continue
+
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
                     await self._random_delay()
@@ -206,6 +223,149 @@ class MarketingScraper:
         finally:
             if page:
                 await page.close()
+
+    @staticmethod
+    def _is_external_campaigns_api_response(response) -> bool:
+        return bool(_EXTERNAL_CAMPAIGNS_API_PATTERN.match(response.url))
+
+    @staticmethod
+    def _extract_external_campaign_entries(
+        payload: Any,
+        response_url: str,
+    ) -> list[dict[str, str]]:
+        """Извлечь id и название кампаний из ответа external ads SPA API."""
+        if not _EXTERNAL_CAMPAIGNS_API_PATTERN.match(response_url):
+            return []
+
+        def find_campaigns(value: Any) -> list[dict[str, Any]]:
+            if isinstance(value, dict):
+                for key in ("items", "campaigns", "results"):
+                    candidate = value.get(key)
+                    if isinstance(candidate, list) and all(isinstance(item, dict) for item in candidate):
+                        return candidate
+                data = value.get("data")
+                if isinstance(data, list) and all(isinstance(item, dict) for item in data):
+                    return data
+                if isinstance(data, dict):
+                    return find_campaigns(data)
+            return []
+
+        entries: list[dict[str, str]] = []
+        seen_ids: set[str] = set()
+        for item in find_campaigns(payload):
+            campaign_id = str(item.get("id") or "").strip()
+            if not campaign_id or campaign_id in seen_ids:
+                continue
+            seen_ids.add(campaign_id)
+            name = str(item.get("name") or item.get("title") or campaign_id).strip()
+            entries.append({"id": campaign_id, "name": name})
+        return entries
+
+    @staticmethod
+    def _external_products_report_url(merchant_id: str, campaign_id: str) -> str:
+        query = urlencode({"campaignId": campaign_id, "culture": "ru-RU"})
+        return (
+            "https://marketing.kaspi.kz/external/advertising/products/api/"
+            f"v1/merchant/{merchant_id}/reports/products/xlsx?{query}"
+        )
+
+    async def _scrape_external_marketing(
+        self,
+        page: Page,
+        url: str,
+    ) -> list[AdCampaignData]:
+        """Собрать внешнюю рекламу через API списка кампаний SPA Kaspi.
+
+        Внешний раздел не рендерит ссылки на кампании в DOM, поэтому общий
+        drill-down по `<a href>` здесь неприменим. API вызывается в уже
+        авторизованной Playwright-сессии и возвращает реальные campaignId.
+        """
+        try:
+            async with page.expect_response(
+                self._is_external_campaigns_api_response,
+                timeout=_CONTENT_WAIT_TIMEOUT,
+            ) as response_info:
+                await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT)
+                await self._random_delay()
+            response = await response_info.value
+        except Exception as exc:
+            logger.warning(
+                "MarketingScraper: external ads API списка кампаний не получен на %s: %s",
+                url,
+                exc,
+            )
+            return []
+
+        match = _EXTERNAL_CAMPAIGNS_API_PATTERN.match(response.url)
+        if not match:
+            logger.warning("MarketingScraper: external ads API вернул неожиданный URL %s", response.url)
+            return []
+
+        try:
+            payload = await response.json()
+        except Exception as exc:
+            logger.warning("MarketingScraper: не удалось прочитать список external кампаний: %s", exc)
+            return []
+
+        entries = self._extract_external_campaign_entries(payload, response.url)
+        if not entries:
+            logger.warning(
+                "MarketingScraper: external ads API не вернул кампании на %s",
+                url,
+            )
+            return []
+
+        merchant_id = match.group("merchant_id")
+        logger.info("MarketingScraper: external ads API → %d кампаний", len(entries))
+        products: list[AdCampaignData] = []
+
+        for index, entry in enumerate(entries, start=1):
+            campaign_rows: list[AdCampaignData] = []
+            for days in Config.KASPI_MARKETING_REPORT_PERIODS:
+                report_url = self._apply_report_period(
+                    self._external_products_report_url(merchant_id, entry["id"]),
+                    days,
+                )
+                try:
+                    report_response = await self._context.request.get(
+                        report_url,
+                        timeout=_PAGE_LOAD_TIMEOUT,
+                    )
+                    if not report_response.ok:
+                        logger.warning(
+                            "MarketingScraper: external отчёт кампании %s вернул HTTP %s",
+                            entry["id"],
+                            report_response.status,
+                        )
+                        continue
+                    payload = await report_response.body()
+                    rows = await self._parse_marketing_report_payload(payload, page, depth=0)
+                except Exception as exc:
+                    logger.warning(
+                        "MarketingScraper: не удалось скачать external отчёт кампании %s: %s",
+                        entry["id"],
+                        exc,
+                    )
+                    continue
+
+                for row in rows:
+                    row.source = "kaspi_external_ads"
+                    row.period_days = days
+                    row._campaign_name = entry["name"]  # type: ignore[attr-defined]
+                campaign_rows.extend(rows)
+
+            products.extend(campaign_rows)
+            logger.info(
+                "MarketingScraper: external кампания %d/%d «%s» → %d товаров",
+                index,
+                len(entries),
+                entry["name"][:50],
+                len(campaign_rows),
+            )
+
+        if not products:
+            logger.warning("MarketingScraper: external ads кампании найдены, но товарные отчёты пусты")
+        return products
 
     async def scrape_bonuses(self) -> list[BonusData]:
         """Собрать данные из раздела «Бонусы».
@@ -1890,13 +2050,19 @@ class MarketingScraper:
 
     @staticmethod
     def _find_spend_column(headers: list[str]) -> int | None:
+        def is_ratio(header: str) -> bool:
+            return "доля" in header or "%" in header or "drr" in header
+
         for idx, header in enumerate(headers):
-            if any(token in header for token in ("расход", "затрат", "spend", "expense")):
+            if not is_ratio(header) and any(
+                token in header for token in ("расход", "затрат", "spend", "expense")
+            ):
                 return idx
         # Legacy fallback: «стоимость» без упоминания клика/CPC.
         for idx, header in enumerate(headers):
             if (
-                ("стоим" in header or "cost" in header)
+                not is_ratio(header)
+                and ("стоим" in header or "cost" in header)
                 and "клик" not in header
                 and "cpc" not in header
                 and "ср." not in header
@@ -2207,21 +2373,22 @@ class MarketingScraper:
 
     @staticmethod
     def _deduplicate_bonuses(items: list[BonusData]) -> list[BonusData]:
-        """Объединить дубли бонусов по SKU (берём максимально информативную запись)."""
-        merged: dict[str, BonusData] = {}
+        """Объединить повторы бонусов, не смешивая разные типы бонуса."""
+        merged: dict[tuple[str, str, int], BonusData] = {}
 
         for item in items:
-            existing = merged.get(item.product_sku)
+            key = (item.product_sku, item.source, item.period_days)
+            existing = merged.get(key)
             if not existing:
-                merged[item.product_sku] = item
+                merged[key] = item
                 continue
 
             # Предпочитаем запись с активным бонусом; если обе равны — с большим процентом.
             if item.bonus_active and not existing.bonus_active:
-                merged[item.product_sku] = item
+                merged[key] = item
                 continue
             if item.bonus_active == existing.bonus_active and item.bonus_percent > existing.bonus_percent:
-                merged[item.product_sku] = item
+                merged[key] = item
 
         return list(merged.values())
 
