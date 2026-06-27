@@ -17,5 +17,6 @@ def patch_engine_sleep():
     из-за WHATSAPP_SEND_DELAY_MIN/MAX = 5/10 в engine.py.
     """
     with patch("workflow.engine.WHATSAPP_SEND_DELAY_MIN", 0), \
-         patch("workflow.engine.WHATSAPP_SEND_DELAY_MAX", 0):
+         patch("workflow.engine.WHATSAPP_SEND_DELAY_MAX", 0), \
+         patch("workflow.engine.WHATSAPP_DOCUMENT_SEND_DELAY", 0):
         yield

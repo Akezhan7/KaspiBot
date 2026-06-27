@@ -20,6 +20,7 @@ from database.seller_workflow import SellerWorkflowDB
 from database.message_log import MessageLogDB
 from database.legal_requests import LegalRequestsDB
 from whatsapp.classifier import ClassificationResult, ClassificationType
+from config import Config
 from workflow.engine import WorkflowEngine
 
 
@@ -390,7 +391,7 @@ async def test_send_warn1_success(db_path):
     result = await engine.send_warn1(wf_id)
 
     assert result is True
-    wa_client.send_text.assert_called_once()
+    assert wa_client.send_text.call_count == 2
     notifier.notify_warn1_sent.assert_called()
 
     # Проверить статус
@@ -402,9 +403,74 @@ async def test_send_warn1_success(db_path):
     # Проверить лог
     log_db = MessageLogDB(db_path)
     messages = await log_db.get_messages_for_workflow(wf_id)
-    assert len(messages) == 1
+    assert len(messages) == 2
     assert messages[0]["direction"] == "OUT"
     assert messages[0]["wa_message_id"] == "msg001"
+    assert messages[0]["template_code"] == "WARN1_LEGAL_01"
+    assert messages[1]["template_code"] == "WARN1_PRODUCT_LINKS"
+
+
+@pytest.mark.asyncio
+async def test_send_warn1_sends_court_text_certificate_and_product_links_in_order(db_path, tmp_path):
+    """WARN1 уходит в порядке: решение, текст, свидетельство, ссылки."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(
+        db_path,
+        "SKU001",
+        url="https://kaspi.kz/shop/p/sku001",
+        title="Тестовый товар",
+    )
+    await _seed_product_seller(db_path, "SKU001")
+
+    court = tmp_path / "court_decision_copyright_case_7527-26-00-2-5921.pdf"
+    certificate = tmp_path / "copyright_registration_certificate.jpeg"
+    court.write_bytes(b"%PDF-1.4\n")
+    certificate.write_bytes(b"image")
+
+    calls = []
+
+    async def record_text(_phone, text):
+        calls.append(("text", text))
+        return {"idMessage": f"text{len(calls)}"}
+
+    async def record_files(_phone, files, caption=""):
+        calls.append(("files", [Path(fp).name for fp in files], caption))
+        return [{"idMessage": f"file{len(calls)}"}]
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(side_effect=record_text)
+    wa_client.send_files = AsyncMock(side_effect=record_files)
+    notifier = AsyncMock()
+    notifier.send_to_admins = AsyncMock()
+    notifier.notify_warn1_sent = AsyncMock()
+
+    engine = _make_engine(db_path, wa_client=wa_client, notifier=notifier)
+    wf_id = await engine.on_new_seller_detected("M001", ["SKU001"])
+
+    with patch.object(Config, "WARN1_COURT_DECISION_DOCUMENTS", [court], create=True), \
+         patch.object(Config, "WARN1_CERTIFICATE_DOCUMENTS", [certificate], create=True), \
+         patch.object(Config, "WARN1_DOCUMENTS", [court, certificate]), \
+         patch("workflow.engine.asyncio.sleep", new=AsyncMock()):
+        result = await engine.send_warn1(wf_id)
+
+    assert result is True
+    assert calls[0] == ("files", [court.name], "")
+    assert calls[0][1][0].isascii()
+    assert calls[1][0] == "text"
+    assert calls[1][1].startswith("Здравствуйте!\n\n")
+    assert "https://kaspi.kz/shop/p/sku001" not in calls[1][1]
+    assert calls[2] == ("files", [certificate.name], "")
+    assert calls[2][1][0].isascii()
+    assert calls[3][0] == "text"
+    assert "Тестовый товар" in calls[3][1]
+    assert "https://kaspi.kz/shop/p/sku001" in calls[3][1]
+
+    messages = await MessageLogDB(db_path).get_messages_for_workflow(wf_id)
+    assert [m["template_code"] for m in messages] == [
+        "WARN1_LEGAL_01",
+        "WARN1_PRODUCT_LINKS",
+    ]
 
 
 @pytest.mark.asyncio
@@ -443,7 +509,7 @@ async def test_send_warn1_concurrent_calls_send_only_once(db_path):
 
     results = await asyncio.gather(first, second)
 
-    assert send_count == 1
+    assert send_count == 2
     assert results.count(True) == 1
     assert results.count(False) == 1
 

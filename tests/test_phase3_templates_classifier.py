@@ -171,16 +171,34 @@ class TestRenderTemplate:
         assert result == "Дедлайн: {deadline}"
 
     def test_warn1_render_with_all_vars(self):
-        """Рендеринг реального WARN1 с полным контекстом."""
+        """WARN1 рендерится без старой вставки магазина и товаров."""
         t = WARN1_TEMPLATES[0]
         result = render_template(t, {
             "shop_name": "NAVIEN ЦЕНТР",
             "product_links": "— https://kaspi.kz/item/123\n— https://kaspi.kz/item/456",
             "our_company": "PKS Ltd",
         })
-        assert "NAVIEN ЦЕНТР" in result
-        assert "kaspi.kz/item/123" in result
-        assert "PKS Ltd" in result
+        assert "Здравствуйте!" in result
+        assert "NAVIEN ЦЕНТР" not in result
+        assert "kaspi.kz/item/123" not in result
+        assert "{shop_name}" not in result
+        assert "{product_links}" not in result
+
+    def test_warn1_uses_court_decision_text_without_product_links(self):
+        """WARN1 содержит новый судебный текст, а ссылки уходят отдельно."""
+        t = WARN1_TEMPLATES[0]
+        result = render_template(t, {
+            "shop_name": "NAVIEN ЦЕНТР",
+            "product_links": "— https://kaspi.kz/item/123",
+            "our_company": "PKS Ltd",
+        })
+
+        assert result.startswith("Здравствуйте!\n\n")
+        assert "Решением суда по гражданскому делу № 7527-26-00-2/5921" in result
+        assert "Сәлеметсіз бе!" in result
+        assert "№ 7527-26-00-2/5921 азаматтық ісі бойынша сот шешімімен" in result
+        assert "https://kaspi.kz/item/123" not in result
+        assert "{product_links}" not in result
 
     def test_warn2_render_with_context(self):
         """Рендеринг WARN2 с контекстом магазина и товаров."""

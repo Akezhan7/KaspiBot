@@ -48,6 +48,7 @@ MAX_OUTGOING_PER_DAY = 3
 MIN_HOURS_BETWEEN_MESSAGES = 1
 WHATSAPP_SEND_DELAY_MIN = 5
 WHATSAPP_SEND_DELAY_MAX = 10
+WHATSAPP_DOCUMENT_SEND_DELAY = 3
 
 # Название компании для шаблонов
 OUR_COMPANY_NAME = "PKS Ltd"
@@ -221,14 +222,35 @@ class WorkflowEngine:
         # Выбор и рендеринг шаблона
         template = get_warn1_template()
         text = render_template(template, context)
+        product_links_text = (
+            "Ссылки на карточки товаров:\n\n"
+            f"{context['product_links']}"
+        )
 
-        # Отправка текста
+        await self._send_warn_documents(
+            phone,
+            Config.WARN1_COURT_DECISION_DOCUMENTS,
+            workflow_id,
+            "WARN1 court decision",
+        )
+
+        # Отправка текста и отдельного сообщения со ссылками.
         try:
             await asyncio.sleep(random.uniform(
                 WHATSAPP_SEND_DELAY_MIN, WHATSAPP_SEND_DELAY_MAX
             ))
             result = await self._whatsapp.send_text(phone, text)
             wa_message_id = result.get("idMessage")
+            await self._send_warn_documents(
+                phone,
+                Config.WARN1_CERTIFICATE_DOCUMENTS,
+                workflow_id,
+                "WARN1 certificates",
+            )
+            product_links_result = await self._whatsapp.send_text(
+                phone, product_links_text
+            )
+            product_links_wa_message_id = product_links_result.get("idMessage")
         except Exception as e:
             logger.error(
                 f"Ошибка отправки WARN1 для workflow {workflow_id}: {e}"
@@ -240,15 +262,10 @@ class WorkflowEngine:
             )
             return False
 
-        # Отправка документов-вложений (свидетельства об авторском праве)
-        await self._send_warn_documents(
-            phone, Config.WARN1_DOCUMENTS, workflow_id, "WARN1"
-        )
-
         # Обновить статус
         await self._workflow_db.update_status(workflow_id, "WARN1_SENT")
 
-        # Логировать сообщение
+        # Логировать сообщения
         await self._message_log_db.log_message(
             workflow_id=workflow_id,
             seller_id=seller_id,
@@ -256,6 +273,14 @@ class WorkflowEngine:
             text=text,
             template_code=template.code,
             wa_message_id=wa_message_id,
+        )
+        await self._message_log_db.log_message(
+            workflow_id=workflow_id,
+            seller_id=seller_id,
+            direction="OUT",
+            text=product_links_text,
+            template_code="WARN1_PRODUCT_LINKS",
+            wa_message_id=product_links_wa_message_id,
         )
 
         logger.info(
@@ -768,7 +793,7 @@ class WorkflowEngine:
             return
 
         try:
-            await asyncio.sleep(3)
+            await asyncio.sleep(WHATSAPP_DOCUMENT_SEND_DELAY)
             await self._whatsapp.send_files(phone, existing_files)
             logger.info(
                 f"{warn_type} документы отправлены: workflow={workflow_id}, "

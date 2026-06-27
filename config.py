@@ -105,10 +105,15 @@ class Config:
 
     # === WARN DOCUMENTS (файлы-вложения к WARN1/WARN2) ===
     DOCUMENTS_DIR: Path = BASE_DIR / "data" / "documents"
-    WARN1_DOCUMENTS: List[Path] = [
-        BASE_DIR / "data" / "documents" / "copyright_certificate_1.jpg",
-        BASE_DIR / "data" / "documents" / "copyright_certificate_2.jpeg",
+    WARN1_COURT_DECISION_DOCUMENTS: List[Path] = [
+        BASE_DIR / "data" / "documents" / "court_decision_copyright_case_7527-26-00-2-5921.pdf",
     ]
+    WARN1_CERTIFICATE_DOCUMENTS: List[Path] = [
+        BASE_DIR / "data" / "documents" / "copyright_registration_certificate.jpeg",
+    ]
+    WARN1_DOCUMENTS: List[Path] = (
+        WARN1_COURT_DECISION_DOCUMENTS + WARN1_CERTIFICATE_DOCUMENTS
+    )
     WARN2_DOCUMENTS: List[Path] = [
         BASE_DIR / "data" / "documents" / "court_decision.pdf",
     ]

@@ -34,6 +34,15 @@ def db_path(tmp_path):
     return tmp_path / "test_escalation.db"
 
 
+@pytest.fixture(autouse=True)
+def patch_escalation_timeouts():
+    """Фиксированные таймауты для тестов, независимо от локального .env."""
+    with patch("workflow.escalation.WARN1_TIMEOUT_HOURS", 24), \
+         patch("workflow.escalation.WARN2_TIMEOUT_HOURS", 24), \
+         patch("workflow.escalation.DIALOG_TIMEOUT_HOURS", 24):
+        yield
+
+
 async def _init_db(db_path: Path):
     """Инициализация схемы + миграции."""
     await DatabaseSchema.init_db(db_path)
@@ -136,7 +145,7 @@ async def test_process_new_sellers_sends_warn1(db_path):
     scheduler = EscalationScheduler(engine)
     await scheduler.process_new_sellers()
 
-    wa_client.send_text.assert_called_once()
+    assert wa_client.send_text.call_count == 2
 
     wf_db = SellerWorkflowDB(db_path)
     wf = await wf_db.get_workflow(wf_id)
@@ -485,7 +494,7 @@ async def test_process_multiple_new_sellers(db_path):
     scheduler = EscalationScheduler(engine)
     await scheduler.process_new_sellers()
 
-    assert wa_client.send_text.call_count == 3
+    assert wa_client.send_text.call_count == 6
 
     wf_db = SellerWorkflowDB(db_path)
     for i in range(1, 4):
