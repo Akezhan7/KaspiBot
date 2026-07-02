@@ -794,7 +794,7 @@ class TestEngineAntispam:
         wf_db = SellerWorkflowDB(db_path)
         await wf_db.update_status(wf_id, "WARN1_SENT")
 
-        # WARN2 — должен отправиться (2-е сообщение)
+        # WARN2 — должен отправиться media-only сообщением
         result2 = await engine.send_warn2(wf_id)
         assert result2 is True
 
@@ -913,13 +913,14 @@ class TestEngineWarnFailure:
         await _seed_product(db_path)
 
         wa_client = AsyncMock()
-        # WARN1 —OK, WARN2 — ошибка
+        # WARN1 — OK, WARN2 media upload — ошибка
         wa_client.send_text = AsyncMock(
             side_effect=[
                 {"idMessage": "ok"},
-                RuntimeError("Connection reset"),
+                {"idMessage": "links"},
             ]
         )
+        wa_client.send_files = AsyncMock(side_effect=RuntimeError("Connection reset"))
 
         notifier = AsyncMock()
         notifier.send_to_admins = AsyncMock()

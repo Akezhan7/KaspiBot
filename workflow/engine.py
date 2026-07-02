@@ -34,7 +34,6 @@ from whatsapp import (
     MessageClassifier,
     ClassificationType,
     get_warn1_template,
-    get_warn2_template,
     get_auto_reply_template,
     render_template,
     normalize_phone,
@@ -227,6 +226,11 @@ class WorkflowEngine:
             f"{context['product_links']}"
         )
 
+        if not self._validate_warn_documents(
+            Config.WARN1_DOCUMENTS, workflow_id, "WARN1"
+        ):
+            return False
+
         await self._send_warn_documents(
             phone,
             Config.WARN1_COURT_DECISION_DOCUMENTS,
@@ -295,7 +299,7 @@ class WorkflowEngine:
 
     async def send_warn2(self, workflow_id: int) -> bool:
         """
-        Отправить WARN2 через WhatsApp.
+        Отправить WARN2 через WhatsApp как media-only уведомление.
 
         Returns:
             True если сообщение отправлено, False при ошибке
@@ -332,19 +336,21 @@ class WorkflowEngine:
             )
             return False
 
-        # Добавить дату WARN1 для шаблонов WARN2
-        if workflow.get("warn1_sent_at"):
-            context["warn1_date"] = self._format_datetime(workflow["warn1_sent_at"])
-
-        template = get_warn2_template()
-        text = render_template(template, context)
+        if not self._validate_warn_documents(
+            Config.WARN2_DOCUMENTS, workflow_id, "WARN2"
+        ):
+            return False
 
         try:
             await asyncio.sleep(random.uniform(
                 WHATSAPP_SEND_DELAY_MIN, WHATSAPP_SEND_DELAY_MAX
             ))
-            result = await self._whatsapp.send_text(phone, text)
-            wa_message_id = result.get("idMessage")
+            results = await self._whatsapp.send_files(phone, Config.WARN2_DOCUMENTS)
+            wa_message_id = (
+                results[0].get("idMessage")
+                if isinstance(results, list) and results
+                else None
+            )
         except Exception as e:
             logger.error(
                 f"Ошибка отправки WARN2 для workflow {workflow_id}: {e}"
@@ -356,19 +362,15 @@ class WorkflowEngine:
             )
             return False
 
-        # Отправка документов-вложений (решение суда)
-        await self._send_warn_documents(
-            phone, Config.WARN2_DOCUMENTS, workflow_id, "WARN2"
-        )
-
         await self._workflow_db.update_status(workflow_id, "WARN2_SENT")
 
+        file_list_text = "\n".join(f"- {p.name}" for p in Config.WARN2_DOCUMENTS)
         await self._message_log_db.log_message(
             workflow_id=workflow_id,
             seller_id=seller_id,
             direction="OUT",
-            text=text,
-            template_code=template.code,
+            text=f"WARN2 media-only sent:\n{file_list_text}",
+            template_code="WARN2_MEDIA_ONLY",
             wa_message_id=wa_message_id,
         )
 
@@ -775,6 +777,24 @@ class WorkflowEngine:
     # ------------------------------------------------------------------
     # Приватные методы
     # ------------------------------------------------------------------
+
+    def _validate_warn_documents(
+        self,
+        document_paths: List[Path],
+        workflow_id: int,
+        warn_type: str,
+    ) -> bool:
+        """Проверить, что обязательные WARN-вложения доступны до отправки."""
+        missing_files = [p for p in document_paths if not p.exists()]
+        if not missing_files:
+            return True
+
+        for path in missing_files:
+            logger.error(
+                f"Обязательный файл-вложение для {warn_type} не найден: "
+                f"{path} (workflow {workflow_id})"
+            )
+        return False
 
     async def _send_warn_documents(
         self,

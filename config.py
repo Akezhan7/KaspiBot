@@ -115,7 +115,8 @@ class Config:
         WARN1_COURT_DECISION_DOCUMENTS + WARN1_CERTIFICATE_DOCUMENTS
     )
     WARN2_DOCUMENTS: List[Path] = [
-        BASE_DIR / "data" / "documents" / "court_decision.pdf",
+        BASE_DIR / "data" / "documents" / "student_helper_video.mov",
+        BASE_DIR / "data" / "documents" / "court_decision_copyright_case_7527-26-00-2-5921.pdf",
     ]
 
     # === KASPI PAY (Scraper / Marketing) ===

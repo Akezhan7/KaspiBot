@@ -551,19 +551,56 @@ async def test_send_warn1_whatsapp_error(db_path):
     assert wf["status"] == "NEW_SELLER_ATTACH"
 
 
+@pytest.mark.asyncio
+async def test_send_warn1_missing_required_attachment_does_not_send_partial_notice(db_path, tmp_path):
+    """WARN1 не уходит частично, если обязательного вложения нет."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(db_path)
+    await _seed_product_seller(db_path)
+
+    court = tmp_path / "court_decision_copyright_case_7527-26-00-2-5921.pdf"
+    missing_certificate = tmp_path / "copyright_registration_certificate.jpeg"
+    court.write_bytes(b"%PDF-1.5\n")
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(return_value={"idMessage": "msg001"})
+    wa_client.send_files = AsyncMock(return_value=[{"idMessage": "file001"}])
+    notifier = AsyncMock()
+    notifier.send_to_admins = AsyncMock()
+    notifier.notify_warn1_sent = AsyncMock()
+
+    engine = _make_engine(db_path, wa_client=wa_client, notifier=notifier)
+    wf_id = await engine.on_new_seller_detected("M001", ["SKU001"])
+
+    with patch.object(Config, "WARN1_COURT_DECISION_DOCUMENTS", [court]), \
+         patch.object(Config, "WARN1_CERTIFICATE_DOCUMENTS", [missing_certificate]), \
+         patch.object(Config, "WARN1_DOCUMENTS", [court, missing_certificate]):
+        result = await engine.send_warn1(wf_id)
+
+    assert result is False
+    wa_client.send_text.assert_not_called()
+    wa_client.send_files.assert_not_called()
+    notifier.send_to_admins.assert_not_called()
+
+    wf = await SellerWorkflowDB(db_path).get_workflow(wf_id)
+    assert wf["status"] == "NEW_SELLER_ATTACH"
+
+
 # ---------------------------------------------------------------------------
 # send_warn2
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_send_warn2_success(db_path):
-    """WARN2 отправляется, статус обновляется."""
+async def test_send_warn2_success(db_path, tmp_path):
+    """WARN2 отправляет только видео и решение суда, без текста."""
     await _init_db(db_path)
     await _seed_seller(db_path)
     await _seed_product(db_path)
 
     wa_client = AsyncMock()
     wa_client.send_text = AsyncMock(return_value={"idMessage": "msg002"})
+    wa_client.send_files = AsyncMock(return_value=[{"idMessage": "files002"}])
     notifier = AsyncMock()
     notifier.send_to_admins = AsyncMock()
 
@@ -573,15 +610,69 @@ async def test_send_warn2_success(db_path):
     # Послать WARN1 сначала
     await engine.send_warn1(wf_id)
     wa_client.send_text.reset_mock()
+    wa_client.send_files.reset_mock()
+
+    video = tmp_path / "student_helper_video.mov"
+    court = tmp_path / "court_decision_copyright_case_7527-26-00-2-5921.pdf"
+    video.write_bytes(b"video")
+    court.write_bytes(b"%PDF-1.5\n")
 
     # Теперь WARN2
-    result = await engine.send_warn2(wf_id)
+    with patch.object(Config, "WARN2_DOCUMENTS", [video, court]):
+        result = await engine.send_warn2(wf_id)
+
     assert result is True
+    wa_client.send_text.assert_not_called()
+    wa_client.send_files.assert_called_once()
+    sent_files = wa_client.send_files.call_args.args[1]
+    assert [Path(fp).name for fp in sent_files] == [video.name, court.name]
+    assert video.name.isascii()
+    assert court.name.isascii()
 
     wf_db = SellerWorkflowDB(db_path)
     wf = await wf_db.get_workflow(wf_id)
     assert wf["status"] == "WARN2_SENT"
     assert wf["warn2_sent_at"] is not None
+
+    messages = await MessageLogDB(db_path).get_messages_for_workflow(wf_id)
+    assert messages[-1]["template_code"] == "WARN2_MEDIA_ONLY"
+    assert "student_helper_video.mov" in messages[-1]["message_text"]
+    assert "court_decision_copyright_case_7527-26-00-2-5921.pdf" in messages[-1]["message_text"]
+
+
+@pytest.mark.asyncio
+async def test_send_warn2_missing_required_attachment_does_not_update_status(db_path, tmp_path):
+    """WARN2 не отмечается отправленным, если обязательного файла нет."""
+    await _init_db(db_path)
+    await _seed_seller(db_path)
+    await _seed_product(db_path)
+
+    wa_client = AsyncMock()
+    wa_client.send_text = AsyncMock(return_value={"idMessage": "msg002"})
+    wa_client.send_files = AsyncMock(return_value=[{"idMessage": "files002"}])
+    notifier = AsyncMock()
+    notifier.send_to_admins = AsyncMock()
+
+    engine = _make_engine(db_path, wa_client=wa_client, notifier=notifier)
+    wf_id = await engine.on_new_seller_detected("M001", ["SKU001"])
+    await engine.send_warn1(wf_id)
+    wa_client.send_text.reset_mock()
+    wa_client.send_files.reset_mock()
+
+    missing_video = tmp_path / "student_helper_video.mov"
+    court = tmp_path / "court_decision_copyright_case_7527-26-00-2-5921.pdf"
+    court.write_bytes(b"%PDF-1.5\n")
+
+    with patch.object(Config, "WARN2_DOCUMENTS", [missing_video, court]):
+        result = await engine.send_warn2(wf_id)
+
+    assert result is False
+    wa_client.send_text.assert_not_called()
+    wa_client.send_files.assert_not_called()
+    notifier.send_to_admins.assert_not_called()
+
+    wf = await SellerWorkflowDB(db_path).get_workflow(wf_id)
+    assert wf["status"] == "WARN1_SENT"
 
 
 # ---------------------------------------------------------------------------
@@ -847,8 +938,9 @@ async def test_handle_recidive(db_path):
     # Статус WARN2_SENT (RECIDIVE → WARN2_SENT)
     assert wf["status"] == "WARN2_SENT"
 
-    # WhatsApp вызван
-    wa_client.send_text.assert_called()
+    # WhatsApp вызван media-only WARN2
+    wa_client.send_text.assert_not_called()
+    wa_client.send_files.assert_called()
 
 
 # ---------------------------------------------------------------------------
