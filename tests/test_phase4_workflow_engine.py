@@ -591,6 +591,11 @@ async def test_send_warn1_missing_required_attachment_does_not_send_partial_noti
 # send_warn2
 # ---------------------------------------------------------------------------
 
+def test_warn2_uses_compressed_mp4_video():
+    """WARN2 использует сжатый MP4 вместо исходного MOV."""
+    assert Config.WARN2_DOCUMENTS[0].name == "student_helper_video.mp4"
+
+
 @pytest.mark.asyncio
 async def test_send_warn2_success(db_path, tmp_path):
     """WARN2 отправляет только видео и решение суда, без текста."""
@@ -612,7 +617,7 @@ async def test_send_warn2_success(db_path, tmp_path):
     wa_client.send_text.reset_mock()
     wa_client.send_files.reset_mock()
 
-    video = tmp_path / "student_helper_video.mov"
+    video = tmp_path / "student_helper_video.mp4"
     court = tmp_path / "court_decision_copyright_case_7527-26-00-2-5921.pdf"
     video.write_bytes(b"video")
     court.write_bytes(b"%PDF-1.5\n")
@@ -636,7 +641,7 @@ async def test_send_warn2_success(db_path, tmp_path):
 
     messages = await MessageLogDB(db_path).get_messages_for_workflow(wf_id)
     assert messages[-1]["template_code"] == "WARN2_MEDIA_ONLY"
-    assert "student_helper_video.mov" in messages[-1]["message_text"]
+    assert "student_helper_video.mp4" in messages[-1]["message_text"]
     assert "court_decision_copyright_case_7527-26-00-2-5921.pdf" in messages[-1]["message_text"]
 
 
@@ -659,7 +664,7 @@ async def test_send_warn2_missing_required_attachment_does_not_update_status(db_
     wa_client.send_text.reset_mock()
     wa_client.send_files.reset_mock()
 
-    missing_video = tmp_path / "student_helper_video.mov"
+    missing_video = tmp_path / "student_helper_video.mp4"
     court = tmp_path / "court_decision_copyright_case_7527-26-00-2-5921.pdf"
     court.write_bytes(b"%PDF-1.5\n")
 
