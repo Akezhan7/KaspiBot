@@ -82,6 +82,9 @@ class Config:
     GREEN_API_MEDIA_URL: str = os.getenv("GREEN_API_MEDIA_URL", "")
     GREEN_API_INSTANCE_ID: str = os.getenv("GREEN_API_INSTANCE_ID", "")
     GREEN_API_TOKEN: str = os.getenv("GREEN_API_TOKEN", "")
+    WHATSAPP_OUTBOUND_ENABLED: bool = (
+        os.getenv("WHATSAPP_OUTBOUND_ENABLED", "true").strip().lower() == "true"
+    )
     WHATSAPP_WEBHOOK_PORT: int = int(os.getenv("WHATSAPP_WEBHOOK_PORT", "8443"))
     WHATSAPP_WEBHOOK_HOST: str = os.getenv("WHATSAPP_WEBHOOK_HOST", "0.0.0.0")
     WHATSAPP_WEBHOOK_IP_WHITELIST: str = os.getenv("WHATSAPP_WEBHOOK_IP_WHITELIST", "")

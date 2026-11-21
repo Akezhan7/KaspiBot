@@ -109,11 +109,12 @@ class GreenAPIClient(WhatsAppClientBase):
 
     def __init__(
         self, api_url: str, instance_id: str, token: str,
-        media_url: str = "",
+        media_url: str = "", outbound_enabled: bool = True,
     ) -> None:
         self._api_url = api_url.rstrip("/")
         self._instance_id = instance_id
         self._token = token
+        self._outbound_enabled = outbound_enabled
         # media_url для sendFileByUpload; если не задан — строим из api_url
         if media_url:
             self._media_url = media_url.rstrip("/")
@@ -125,6 +126,11 @@ class GreenAPIClient(WhatsAppClientBase):
                 "GreenAPIClient создан без credentials — "
                 "WhatsApp-функции будут недоступны"
             )
+
+    def _ensure_outbound_enabled(self) -> None:
+        """Запретить отправку на транспортном уровне при выключенной рассылке."""
+        if not self._outbound_enabled:
+            raise RuntimeError("Исходящие WhatsApp-сообщения отключены")
 
     def _build_url(self, method: str) -> str:
         """Построить URL эндпоинта Green API."""
@@ -223,6 +229,7 @@ class GreenAPIClient(WhatsAppClientBase):
         Тело: {"chatId": "77017545109@c.us", "message": "текст"}
         Ответ: {"idMessage": "3EB0C767D097B7C7C030"}
         """
+        self._ensure_outbound_enabled()
         chat_id = phone_to_chat_id(to_phone)
 
         if len(text) > 20000:
@@ -254,6 +261,7 @@ class GreenAPIClient(WhatsAppClientBase):
 
         Формат: POST media/waInstance{id}/sendFileByUpload/{token}
         """
+        self._ensure_outbound_enabled()
         chat_id = phone_to_chat_id(to_phone)
         file_path = Path(file_path)
 

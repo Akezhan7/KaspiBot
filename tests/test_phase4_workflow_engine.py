@@ -107,6 +107,26 @@ def _make_engine(db_path, wa_client=None, classifier=None,
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_outbound_disabled_blocks_manual_and_automatic_sends():
+    dependencies = {
+        name: AsyncMock() for name in (
+            "workflow_db", "message_log_db", "legal_db", "sellers_db",
+            "products_db", "product_sellers_db", "whatsapp_client",
+            "classifier", "notification_service",
+        )
+    }
+    engine = WorkflowEngine(**dependencies, outbound_enabled=False)
+
+    result = await engine.send_products_to_seller("M001")
+
+    assert result.success is False
+    assert result.reason == "outbound_disabled"
+    assert await engine._can_send_message("M001") is False
+    dependencies["message_log_db"].count_messages_today.assert_not_called()
+    dependencies["whatsapp_client"].send_text.assert_not_called()
+    dependencies["workflow_db"].create_workflow.assert_not_called()
+
+@pytest.mark.asyncio
 async def test_on_new_seller_creates_workflow(db_path):
     """Создание нового workflow при обнаружении продавца."""
     await _init_db(db_path)

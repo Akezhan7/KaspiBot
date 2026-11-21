@@ -86,6 +86,7 @@ class WorkflowEngine:
         classifier: MessageClassifier,
         notification_service: NotificationService,
         scanner=None,
+        outbound_enabled: bool = True,
     ) -> None:
         self._workflow_db = workflow_db
         self._message_log_db = message_log_db
@@ -97,6 +98,7 @@ class WorkflowEngine:
         self._classifier = classifier
         self._notifications = notification_service
         self._scanner = scanner
+        self._outbound_enabled = outbound_enabled
         self._warn1_locks: Dict[int, asyncio.Lock] = {}
         self._manual_send_locks: Dict[str, asyncio.Lock] = {}
 
@@ -387,6 +389,10 @@ class WorkflowEngine:
         self, seller_id: str
     ) -> ManualProductSendResult:
         """Выполнить ручную отправку без дублей от быстрых повторных нажатий."""
+        if not self._outbound_enabled:
+            logger.info("Ручная отправка WhatsApp отключена")
+            return ManualProductSendResult(False, "outbound_disabled")
+
         lock = self._manual_send_locks.setdefault(seller_id, asyncio.Lock())
         if lock.locked():
             return ManualProductSendResult(False, "send_in_progress")
@@ -761,16 +767,21 @@ class WorkflowEngine:
             f"workflow={workflow_id}"
         )
 
+        if self._outbound_enabled:
+            action_text = "Сразу отправляем WARN2."
+        else:
+            action_text = "Рассылка отключена — WARN2 не отправлен."
+
         await self._notifications.send_to_admins(
             f"🔄 <b>Рецидив!</b>\n\n"
             f"Магазин: {merchant_name}\n"
             f"Ранее был в воронке, вернулся.\n"
             f"Workflow: #{workflow_id}\n"
-            f"Сразу отправляем WARN2."
+            f"{action_text}"
         )
 
-        # Сразу WARN2
-        await self.send_warn2(workflow_id)
+        if self._outbound_enabled:
+            await self.send_warn2(workflow_id)
 
         return workflow_id
 
@@ -834,6 +845,10 @@ class WorkflowEngine:
         - Макс 3 исходящих в день
         - Минимум 1 час между сообщениями
         """
+        if not self._outbound_enabled:
+            logger.info("Исходящее WhatsApp-сообщение заблокировано настройкой")
+            return False
+
         count_today = await self._message_log_db.count_messages_today(
             seller_id, "OUT"
         )

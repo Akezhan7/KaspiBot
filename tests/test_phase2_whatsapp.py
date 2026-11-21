@@ -126,6 +126,19 @@ from whatsapp.client import GreenAPIClient
 class TestGreenAPIClient:
     """Тесты клиента Green API с mock HTTP."""
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["send_text", "send_file"])
+    async def test_outbound_disabled_blocks_before_http(self, method, tmp_path):
+        client = GreenAPIClient(
+            api_url="https://api.green-api.com",
+            instance_id="test", token="test", outbound_enabled=False,
+        )
+        payload = "test" if method == "send_text" else tmp_path / "document.pdf"
+        with patch("whatsapp.client.httpx.AsyncClient") as http_client:
+            with pytest.raises(RuntimeError, match="отключены"):
+                await getattr(client, method)("77017545109", payload)
+            http_client.assert_not_called()
+
     def _make_client(self) -> GreenAPIClient:
         return GreenAPIClient(
             api_url="https://api.green-api.com",

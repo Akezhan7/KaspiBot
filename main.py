@@ -319,6 +319,7 @@ async def main():
             instance_id=Config.GREEN_API_INSTANCE_ID,
             token=Config.GREEN_API_TOKEN,
             media_url=Config.GREEN_API_MEDIA_URL,
+            outbound_enabled=Config.WHATSAPP_OUTBOUND_ENABLED,
         )
         
         # Инициализация LLM-классификатора.
@@ -357,6 +358,7 @@ async def main():
             classifier=classifier,
             notification_service=notification_service,
             scanner=scanner,
+            outbound_enabled=Config.WHATSAPP_OUTBOUND_ENABLED,
         )
         
         # Передать workflow_engine в scanner для интеграции
