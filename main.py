@@ -24,6 +24,7 @@ from database import (
     ProductSellersDB,
 )
 from database.migrations import DatabaseMigrations
+from bot.crm_notifications import SupplierResponseNotifications
 from parser import ProductScanner
 from bot import router, admin_router, scraper_router, set_auth_manager, set_marketing_scraper, NotificationService
 from workflow import WorkflowEngine, EscalationScheduler
@@ -554,6 +555,22 @@ async def main():
         
         # Startup
         await on_startup()
+
+        if Config.CRM_NOTIFICATIONS_URL and Config.KASPIBOT_CRM_TOKEN:
+            crm_notifications = SupplierResponseNotifications(
+                bot, Config.DB_PATH, Config.CRM_NOTIFICATIONS_URL,
+                Config.KASPIBOT_CRM_TOKEN, Config.ADMIN_USER_IDS,
+            )
+            scheduler.add_job(
+                crm_notifications.poll,
+                trigger=IntervalTrigger(seconds=10),
+                id="crm_supplier_responses",
+                max_instances=1,
+                coalesce=True,
+                replace_existing=True,
+            )
+        elif Config.CRM_NOTIFICATIONS_URL or Config.KASPIBOT_CRM_TOKEN:
+            logger.warning("Задайте CRM_NOTIFICATIONS_URL и KASPIBOT_CRM_TOKEN для уведомлений CRM")
         
         # Запуск WhatsApp webhook-сервера
         await whatsapp_webhook.start()

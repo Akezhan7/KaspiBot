@@ -40,6 +40,10 @@ class Config:
         if uid.strip()
     ]
     
+    # === CRM NOTIFICATIONS ===
+    CRM_NOTIFICATIONS_URL: str = os.getenv("CRM_NOTIFICATIONS_URL", "").strip()
+    KASPIBOT_CRM_TOKEN: str = os.getenv("KASPIBOT_CRM_TOKEN", "").strip()
+
     # === PROXY ===
     PROXY_URL: str = os.getenv("PROXY_URL", "")
     PROXY_CHANGE_API: str = os.getenv("PROXY_CHANGE_API", "")

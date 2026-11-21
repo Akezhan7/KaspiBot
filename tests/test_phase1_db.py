@@ -51,7 +51,7 @@ async def test_migration_version(db_path):
     await _init_db(db_path)
     migrations = DatabaseMigrations(db_path)
     version = await migrations.get_current_version()
-    assert version == 7
+    assert version == 8
 
 
 # === SellerWorkflowDB ===

@@ -218,6 +218,19 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             "ALTER TABLE seller_workflows ADD COLUMN manual_products_initial_count INTEGER",
         ],
     ),
+    (
+        8,
+        "Отправленные уведомления CRM по администраторам",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS crm_notification_deliveries (
+                event_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                PRIMARY KEY (event_id, chat_id)
+            )
+            """,
+        ],
+    ),
 ]
 
 
