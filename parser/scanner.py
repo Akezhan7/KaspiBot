@@ -174,7 +174,7 @@ class ProductScanner:
                 )
                 
                 # 5. Если новый или вернулся - добавить в уведомления
-                if is_new or was_inactive:
+                if (is_new or was_inactive) and not product.get('monitor_baseline_pending'):
                     # Получить телефон если еще не получили
                     if phone is None:
                         seller = await self.sellers_db.get_seller(merchant_id)
@@ -260,7 +260,7 @@ class ProductScanner:
             scan_id = await self.scan_logs_db.start_scan()
 
             # Получить все товары
-            products = await self.products_db.get_all_products()
+            products = await self.products_db.get_all_products(monitored_only=True)
             total_products = len(products)
 
             if total_products == 0:

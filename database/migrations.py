@@ -231,6 +231,14 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             """,
         ],
     ),
+    (
+        9,
+        "Выбор товаров для мониторинга и стартовый снимок продавцов",
+        [
+            "ALTER TABLE products ADD COLUMN monitor_enabled INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE products ADD COLUMN monitor_baseline_pending INTEGER NOT NULL DEFAULT 0",
+        ],
+    ),
 ]
 
 

@@ -247,9 +247,10 @@ class ProductSellersDB:
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 query = """
-                    SELECT product_id
-                    FROM product_sellers
-                    WHERE seller_id = ? AND is_active = 1
+                    SELECT ps.product_id
+                    FROM product_sellers ps
+                    JOIN products p ON p.master_sku = ps.product_id
+                    WHERE ps.seller_id = ? AND ps.is_active = 1 AND p.monitor_enabled = 1
                 """
                 async with db.execute(query, (seller_id,)) as cursor:
                     rows = await cursor.fetchall()
@@ -317,6 +318,7 @@ class ProductSellersDB:
                     WHERE ps.seller_id = ? 
                     AND ps.product_id != ?
                     AND ps.is_active = 1
+                    AND p.monitor_enabled = 1
                     ORDER BY ps.last_seen DESC
                 """
                 

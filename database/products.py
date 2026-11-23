@@ -54,13 +54,14 @@ class ProductsDB:
             logger.error(f"Ошибка получения товара {master_sku}: {e}")
             raise
     
-    async def get_all_products(self) -> List[Dict[str, Any]]:
-        """Получить все товары"""
+    async def get_all_products(self, *, monitored_only: bool = False) -> List[Dict[str, Any]]:
+        """Получить каталог, при необходимости только позиции мониторинга."""
+        where = " WHERE monitor_enabled = 1" if monitored_only else ""
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT * FROM products ORDER BY added_at DESC"
+                    f"SELECT * FROM products{where} ORDER BY added_at DESC"
                 ) as cursor:
                     rows = await cursor.fetchall()
                     return [dict(row) for row in rows]
@@ -86,6 +87,7 @@ class ProductsDB:
                     FROM products p
                     LEFT JOIN product_sellers ps ON p.master_sku = ps.product_id 
                         AND ps.is_active = 1
+                    WHERE p.monitor_enabled = 1
                     GROUP BY p.master_sku
                     ORDER BY sellers_count DESC, p.added_at DESC
                 """
@@ -129,7 +131,7 @@ class ProductsDB:
                 await db.execute(
                     """
                     UPDATE products 
-                    SET last_checked = ? 
+                    SET last_checked = ?, monitor_baseline_pending = 0
                     WHERE master_sku = ?
                     """,
                     (now_kz_str(), master_sku)
@@ -181,18 +183,19 @@ class ProductsDB:
             logger.error(f"Ошибка обновления ссылки для {master_sku}: {e}")
             raise
     
-    async def get_products_count(self) -> int:
-        """Получить количество товаров"""
+    async def get_products_count(self, *, monitored_only: bool = False) -> int:
+        """Получить количество товаров."""
+        where = " WHERE monitor_enabled = 1" if monitored_only else ""
         try:
             async with aiosqlite.connect(self.db_path) as db:
-                async with db.execute("SELECT COUNT(*) FROM products") as cursor:
+                async with db.execute(f"SELECT COUNT(*) FROM products{where}") as cursor:
                     row = await cursor.fetchone()
                     return row[0] if row else 0
         except Exception as e:
             logger.error(f"Ошибка подсчета товаров: {e}")
             raise
     
-    async def search_products(self, query: str) -> List[Dict[str, Any]]:
+    async def search_products(self, query: str, *, monitored_only: bool = False) -> List[Dict[str, Any]]:
         """
         Поиск товаров по названию или SKU (по релевантным словам)
         
@@ -223,6 +226,8 @@ class ProductsDB:
                     params.extend([word_pattern, word_pattern])
                 
                 where_clause = " OR ".join(where_conditions)
+                if monitored_only:
+                    where_clause = f"p.monitor_enabled = 1 AND ({where_clause})"
                 
                 query_sql = f"""
                     SELECT 

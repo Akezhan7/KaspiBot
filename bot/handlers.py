@@ -118,7 +118,7 @@ async def cmd_export_urls(message: Message):
 
     try:
         products_db = ProductsDB(Config.DB_PATH)
-        products = await products_db.get_all_products()
+        products = await products_db.get_all_products(monitored_only=True)
 
         if not products:
             await message.answer("Нет отслеживаемых товаров")
@@ -935,7 +935,7 @@ async def cmd_stats(message: Message):
         scan_logs_db = ScanLogsDB(Config.DB_PATH)
         
         # Получить данные
-        total_products = await products_db.get_products_count()
+        total_products = await products_db.get_products_count(monitored_only=True)
         total_sellers = await product_sellers_db.get_total_sellers_count()
         total_links = await product_sellers_db.get_active_links_count()
         last_scan = await scan_logs_db.get_last_scan()
@@ -2013,7 +2013,7 @@ async def perform_search(message: Message, query: str):
     products_db = ProductsDB(Config.DB_PATH)
     
     # Выполняем поиск
-    results = await products_db.search_products(query)
+    results = await products_db.search_products(query, monitored_only=True)
     
     if not results:
         await message.answer(

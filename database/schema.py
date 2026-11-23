@@ -19,7 +19,9 @@ class DatabaseSchema:
         url TEXT NOT NULL,
         title TEXT,
         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_checked TIMESTAMP
+        last_checked TIMESTAMP,
+        monitor_enabled INTEGER NOT NULL DEFAULT 1,
+        monitor_baseline_pending INTEGER NOT NULL DEFAULT 0
     );
     
     -- Таблица продавцов
